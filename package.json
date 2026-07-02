@@ -1,0 +1,359 @@
+{
+    "$schema": "./@types/schema/package/index.json",
+    "package_version": 2,
+    "name": "pts-asset",
+    "version": "1.0.0",
+    "author": "pTSern",
+    "editor": ">=3.8.8",
+    "scripts": {
+        "preinstall": "node ./scripts/preinstall.js",
+        "build": "tsc",
+        "watch": "tsc -w"
+    },
+    "description": "i18n:pts-asset.description",
+    "main": "./dist/main.js",
+    "devDependencies": {
+        "@cocos/creator-types": "^3.8.0",
+        "@types/fs-extra": "^11.0.4",
+        "@types/node": "^18.17.1",
+        "fs-extra": "^10.0.0",
+        "typescript": "^5.8.2",
+        "vue": "^3.1.4"
+    },
+    "panels": {
+        "default": {
+            "title": "pTSPanel",
+            "main": "dist/panel/default",
+            "flags": {
+                "save": true
+            },
+            "size": {
+                "width": 400,
+                "height": 600
+            }
+        }
+    },
+    "contributions": {
+        "profile": {
+            "project": {
+                "global_variable_key": {
+                    "default": "pTS.settings",
+                    "message": "profile::project::changed",
+                    "label": "Global Variable Key"
+                },
+                "head_version": {
+                    "default": 1,
+                    "message": "profile::project::changed",
+                    "label": "Head Version",
+                    "tooltip": "The number tell what is the big version it is.\nExample: `X.1.2`"
+                },
+                "sub_version": {
+                    "default": 0,
+                    "message": "profile::project::changed",
+                    "label": "Sub Version"
+                },
+                "tail_version": {
+                    "default": 1,
+                    "message": "profile::project::changed",
+                    "label": "Tail Version"
+                },
+                "prefix_key": {
+                    "default": "game$_$",
+                    "message": "profile::project::changed",
+                    "label": "Prefix Key"
+                },
+                "storage_location": {
+                    "default": "null",
+                    "message": "profile::project::changed",
+                    "label": "Storage Location"
+                },
+                "btn_save": {
+                    "default": false,
+                    "message": "profile::project::save",
+                    "label": "Btn Save",
+                    "data": "Save",
+                    "value": "Save 2"
+                },
+                "plugin_name": {
+                    "default": "_game_data_manager",
+                    "message": "profile::project::changed_location",
+                    "label": "Plugin Name"
+                },
+                "plugin_location": {
+                    "default": "",
+                    "message": "profile::project::changed_location",
+                    "label": "Plugin Location"
+                },
+                "game_distribution_game_id": {
+                    "default": "",
+                    "label": "Game Id",
+                    "message": "profile::project::game_distribution::changed_game_id"
+                },
+                "target_platform": {
+                    "default": "game_distribution",
+                    "label": "Target Platform",
+                    "message": "profile::project::target_platform_changed"
+                }
+            }
+        },
+        "project": {
+            "tab_1": {
+                "label": "Data Manager",
+                "content": {
+                    "head_version": {
+                        "ui": "ui-num-input",
+                        "attributes": {
+                            "min": 0,
+                            "step": 1
+                        }
+                    },
+                    "sub_version": {
+                        "ui": "ui-num-input",
+                        "attributes": {
+                            "min": 0,
+                            "step": 1,
+                            "max": 9,
+                            "tooltip": "The middle number stay inside the string of version.\nExample: `1.X.2`"
+                        }
+                    },
+                    "tail_version": {
+                        "ui": "ui-num-input",
+                        "attributes": {
+                            "min": 0,
+                            "step": 1,
+                            "max": 9,
+                            "tooltip": "The last number stay inside the string of version.\nExample: `1.1.X`"
+                        }
+                    },
+                    "prefix_key": {
+                        "ui": "ui-input",
+                        "attributes": {
+                            "placeholder": "The prefix of the key of game's data.",
+                            "show-clear": true
+                        }
+                    },
+                    "target_platform": {
+                        "ui": "ui-select",
+                        "items": [
+                            { "value": "game_distribution", "label": "Game Distribution" },
+                            { "value": "tiktok", "label": "TikTok" },
+                            { "value": "crazy_game", "label": "Crazy Game" }
+                        ]
+                    },
+                    "btn_save": {
+                        "ui": "ui-button",
+                        "attributes": {
+                            "type": "primary",
+                            "id": "profile::project::btn_save_id",
+                            "label": "Save"
+                        },
+                        "value": "Save 1",
+                        "data": "Save 2"
+                    }
+                }
+            },
+            "tab_2": {
+                "label": "Options",
+                "content": {
+                    "global_variable_key": {
+                        "ui": "ui-input",
+                        "attributes": {
+                            "tooltip": "The key that storage this config on global variable. \nUse `.` for chain object.",
+                            "show-clear": true
+                        }
+                    },
+                    "storage_location": {
+                        "ui": "ui-select",
+                        "items": [
+                            {
+                                "value": "null",
+                                "label": "Nothing"
+                            },
+                            {
+                                "value": "local",
+                                "label": "Local"
+                            },
+                            {
+                                "value": "global",
+                                "label": "Global"
+                            }
+                        ]
+                    },
+                    "plugin_name": {
+                        "ui": "ui-input",
+                        "attributes": {
+                            "show-clear": true
+                        }
+                    },
+                    "plugin_location": {
+                        "ui": "ui-file",
+                        "attributes": {
+                            "protocols": "project",
+                            "value": "project://assets/",
+                            "type": "directory"
+                        }
+                    }
+                }
+            },
+            "tab_3": {
+                "label": "Game Distribution",
+                "content": {
+                    "game_distribution_game_id": {
+                        "ui": "ui-input",
+                        "attributes": {
+                            "show-clear": true,
+                            "placeholder": "Place your game id here"
+                        }
+                    }
+                }
+            },
+            "tab_4": {
+                "label": "TikTok",
+                "content": {
+                }
+            },
+            "tab_5": {
+                "label": "Crazy Game",
+                "content": {
+
+                }
+            }
+        },
+        "asset-db": {
+            "mount": {
+                "path": "./assets",
+                "readonly": true
+            }
+        },
+        "assets": {
+            "types": [
+                {
+                    "type": "pts",
+                    "extends": "cc.Asset",
+                    "icon": "db://pts-asset/static/box.png"
+                }
+            ],
+            "drop": [
+                {
+                    "type": "pts",
+                    "message": "drop-asset-pts"
+                }
+            ]
+        },
+        "scene": {
+            "script": "./src/_cc.js"
+        },
+        "inspector": {
+            "section": {
+                "asset": {
+                    "*": "./dist/pts.js"
+                },
+                "node": {
+                    "Smart_JsonAsset": "./dist/smart_ja.js"
+                }
+            }
+        },
+        "menu": [
+            {
+                "path": "i18n:pts-asset",
+                "label": "i18n:pts-asset.panel",
+                "message": "panel-open",
+                "order": -1
+            },
+            {
+                "path": "i18n:pts-asset",
+                "label": "i18n:pts-asset.reload_asset",
+                "message": "reload"
+            },
+            {
+                "path": "i18n:pts-asset",
+                "label": "i18n:pts-asset.createz",
+                "message": "createz"
+            },
+            {
+                "path": "i18n:pts-asset",
+                "label": "OMG",
+                "message": "_cc:log"
+            }
+        ],
+        "messages": {
+            "profile::project::game_distribution::changed_game_id": {
+                "methods": [
+                    "profile::project::game_distribution::changed_game_id"
+                ]
+            },
+            "profile::project::target_platform_changed": {
+                "methods": [
+                    "profile::project::target_platform_changed"
+                ]
+            },
+            "profile::project::changed_location": {
+                "methods": [
+                    "profile::project::changed_location"
+
+                ]
+            },
+            "profile::project::changed": {
+                "methods": [
+                    "profile::project::changed"
+                ]
+            },
+            "profile::project::save": {
+                "methods": [
+                    "profile::project::save"
+                ]
+            },
+            "profile::project::click_saved": {
+                "methods": [
+                    "profile::project::click_saved"
+                ]
+            },
+            "_cc:log": {
+                "methods": [
+                    "_cc:log"
+                ]
+            },
+            "panel-open": {
+                "methods": [
+                    "onOpenPanel"
+                ]
+            },
+            "register-scripable": {
+                "methods": [
+                    "register"
+                ]
+            },
+            "reload": {
+                "description": "Reload the whole extension.",
+                "methods": [
+                    "reload"
+                ]
+            },
+            "createz": {
+                "methods": [
+                    "onCreateMenuX"
+                ]
+            },
+            "selection:select": {
+                "methods": [
+                    "onSelectionSelect"
+                ]
+            },
+            "drop-asset": {
+                "methods": [
+                    "onDropAsset"
+                ]
+            },
+            "drop-asset-pts": {
+                "methods": [
+                    "onDropAssetPts"
+                ]
+            },
+            "pts::importer::lookup": {
+                "methods": [
+                    "pts_updater"
+                ]
+            }
+        }
+    }
+}
