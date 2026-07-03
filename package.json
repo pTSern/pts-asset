@@ -11,7 +11,7 @@
         "watch": "tsc -w"
     },
     "description": "i18n:pts-asset.description",
-    "main": "./dist/main.js",
+    "main": "./bootstrap.js",
     "devDependencies": {
         "@cocos/creator-types": "^3.8.0",
         "@types/fs-extra": "^11.0.4",
