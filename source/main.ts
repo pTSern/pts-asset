@@ -94,17 +94,13 @@ export const methods: { [key: string]: (...any: any) => any } = {
             await _shippingProjectSettingPlugin();
 
             const _new = _getConfigDir();
-            console.log("[999] GET NEW PROJECT DIR", _new)
             if(!_new) return
 
                 const _url = `${_new.db}/${__config_.plugin_name}.js`
-                console.log("[999] >> OUT PUT URL", _url)
             const _new_info = await Editor.Message.request('asset-db', 'query-asset-info', _url)
-            console.log("[999] GET NEW PROJECT INFO", _new_info)
             _new_info?.uuid && _new_list.push(_new_info.uuid)
 
             await Editor.Profile.setProject('project', "script.sortingPlugin", _new_list);
-            console.log("[999] SET UP NEW PROJECT SETTING", _new_list)
         })
 
 
