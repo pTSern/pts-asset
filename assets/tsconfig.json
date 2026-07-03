@@ -2,6 +2,7 @@
     "extends": "../base.tsconfig.json",
     "compilerOptions": {
         "noEmit": true,
+        "rootDir": "../../",
         "target": "es2019",
         "strict": false,
         "ignoreDeprecations": "6.0",
