@@ -402,6 +402,7 @@ function _onAssetChanged(uuid: string, data: AssetInfo, meta: IAssetMeta) {
  * @zh 扩展启动时触发的方法
  */
 export async function load() {
+    //@ts-ignore
     Editor.Message.addBroadcastListener('scene:ready', _init)
     //Editor.Message.addBroadcastListener('asset-db:asset-change', _onAssetChanged)
     _load();
@@ -413,5 +414,6 @@ export async function load() {
  * @zh 卸载扩展时触发的方法
  */
 export function unload() {
+    //@ts-ignore
     Editor.Message.removeBroadcastListener('scene:ready', _init)
 }
