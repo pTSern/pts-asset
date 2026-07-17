@@ -11,4 +11,8 @@ export class Json_Binder extends Component {
 
     @property({ type: Helper_Param_Creator })
     param: Helper_Param_Creator = new Helper_Param_Creator();
+
+    onFocusInEditor(): void {
+        console.log(">>>", this.param)
+    }
 }
