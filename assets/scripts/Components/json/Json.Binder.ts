@@ -10,9 +10,10 @@ export class Json_Binder extends Component {
     asset: JsonAsset = null
 
     @property({ type: Helper_Param_Creator })
-    param: Helper_Param_Creator = new Helper_Param_Creator();
+    params: Helper_Param_Creator[] = []
 
-    onFocusInEditor(): void {
-        console.log(">>>", this.param)
+    extract() {
+
     }
+
 }
