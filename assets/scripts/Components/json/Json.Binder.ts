@@ -26,10 +26,9 @@ export class Json_Binder extends Component {
     }
 
     protected start(): void {
-        this._read();
     }
 
-    protected _read() {
+    read() {
         if(!this.asset) return;
 
         const _json = this.asset.json;
