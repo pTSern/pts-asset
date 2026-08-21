@@ -133,6 +133,7 @@ exports.unload = function() {
 
 exports.methods = {
     log(...args) {
+		console.log("Check `cce` inside `_cc.js` bounce: ", cce);
         cc.log("Log Via _cc", ...args);
     },
     cc(what) {
