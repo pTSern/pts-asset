@@ -70,24 +70,23 @@
         },
         "menu": [
             {
-                "path": "i18n:pts-asset",
-                "label": "i18n:pts-asset.panel",
-                "message": "panel-open",
-                "order": -1
+                "path": "i18n:menu.extension/pTS Asset",
+                "label": "Open Panel",
+                "message": "open-panel"
             },
             {
-                "path": "i18n:pts-asset",
-                "label": "i18n:pts-asset.reload_asset",
+                "path": "i18n:menu.extension/pTS Asset",
+                "label": "Reload",
                 "message": "reload"
             },
             {
-                "path": "i18n:pts-asset",
-                "label": "i18n:pts-asset.createz",
+                "path": "i18n:menu.extension/pTS Asset",
+                "label": "Create",
                 "message": "createz"
             },
             {
-                "path": "i18n:pts-asset",
-                "label": "OMG",
+                "path": "i18n:menu.extension/pTS Asset",
+                "label": "Log",
                 "message": "_cc:log"
             }
         ],
