@@ -13,6 +13,10 @@
         "forceConsistentCasingInFileNames": true,
         "resolveJsonModule": true,
         "outDir": "./dist",
-        "types": ["node", "@cocos/creator-types/editor"]
+        "types": [
+            "node",
+            "@cocos/creator-types/editor"
+        ],
+        "ignoreDeprecations": "6.0"
     }
 }

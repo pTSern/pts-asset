@@ -26,4 +26,11 @@ export class Json_Watcher extends Component {
         console.log("[See] >>", this._target);
     }
 
+    @editor_property(undefined, { writable: true })
+    protected get __invoke() { return false }
+    protected set __invoke(v) {
+        if(!v) return;
+        pEngine.Json.event.invoke(this._target);
+    }
+
 }
