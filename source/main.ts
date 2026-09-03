@@ -68,13 +68,11 @@ export const methods: { [key: string]: (...any: any) => any } = {
 
         console.log("[pTS_Updater] >>> List pts", _array);
 
-        _array.forEach(async _ => {
+        for (const _ of _array) {
             const _meta = await Editor.Message.request('asset-db', 'query-asset-meta', _.uuid);
-            if(!_meta) return;
-
-            _onAssetChanged(_.uuid, _, _meta);
-        })
-
+            if(!_meta) continue;
+            await _patchPtsLibrary(_.uuid, _, _meta);
+        }
     },
     onDropAssetPts(info, drag) {
         console.log('onDropAssetPts', info);
@@ -115,26 +113,104 @@ export const methods: { [key: string]: (...any: any) => any } = {
         Editor.Panel.open(pkg.name);
     },
 
+    /**
+     * Called by asset-db:asset-change message.
+     * Automatically patches .pts library JSON when assets are imported/changed.
+     */
+    async onAssetChanged(uuid: string) {
+        if (!uuid) return;
+        try {
+            const data = await Editor.Message.request('asset-db', 'query-asset-info', uuid);
+            if (!data) return;
+            // Only process .pts files
+            if (!data.file || !data.file.endsWith('.pts')) return;
+
+            const meta = await Editor.Message.request('asset-db', 'query-asset-meta', uuid);
+            if (!meta) return;
+
+            await _patchPtsLibrary(uuid, data, meta);
+        } catch (e) {
+            // Silently ignore — asset might not be a .pts file
+        }
+    },
+
 };
 
-function _onAssetChanged(uuid: string, data: AssetInfo, meta: IAssetMeta) {
-    if(!data || !meta) return;
-    console.log("ASSET CHANGED INFO", data)
-    console.log("ASSET CHANGED META", meta)
+/**
+ * Patch the library .json for a .pts asset so the runtime deserializer
+ * creates the correct custom class instead of a bare cc.Asset.
+ *
+ * What the Editor's default `*` importer produces:
+ *   { "__type__": "cc.Asset", "_name": "zxc", "_native": ".pts" }
+ *
+ * What we patch it to (if .pts contains __type__: "Test_ThauAsset"):
+ *   { "__type__": "cc.Asset", "_name": "zxc", "_native": ".pts" }
+ *   + store __type__ in meta.userData so runtime can look it up
+ *
+ * We keep __type__ as cc.Asset in the library JSON because Cocos
+ * deserializer only knows cc.Asset properties. The runtime pipeline
+ * in Json._Register.ts reads _nativeAsset (the raw .pts JSON) and
+ * re-prototypes the asset to the correct class.
+ */
+async function _patchPtsLibrary(uuid: string, data: AssetInfo, meta: IAssetMeta) {
+    if (!data || !meta) return;
+    if (!meta.files || !meta.files.includes('.pts')) return;
 
-    if(!meta.files.includes('.pts')) return;
+    // Read the source .pts file to extract __type__
+    let ptsContent: any = null;
+    try {
+        const sourceFile = data.file;
+        if (!sourceFile || !fs.existsSync(sourceFile)) {
+            console.warn(`[pts-asset] Source .pts file not found for uuid=${uuid}`);
+            return;
+        }
+        const raw = fs.readFileSync(sourceFile, 'utf8');
+        ptsContent = JSON.parse(raw);
+    } catch (e) {
+        console.warn(`[pts-asset] Failed to parse .pts source for uuid=${uuid}:`, e);
+        return;
+    }
 
-    const _data = fs.readFileSync(data.library['.json'], 'utf8');
-    if(!_data) return;
-    const _obj = JSON.parse(_data);
-    if(!_obj) return;
+    if (!ptsContent || !ptsContent.__type__) return;
 
-    const _pts = meta.userData;
-    if(!_pts) return;
+    // Store __type__ in meta.userData for reference
+    const needMetaUpdate = meta.userData?.__type__ !== ptsContent.__type__;
+    if (needMetaUpdate) {
+        meta.userData = meta.userData || {};
+        meta.userData.__type__ = ptsContent.__type__;
+        try {
+            await Editor.Message.request('asset-db', 'save-asset-meta', uuid, JSON.stringify(meta));
+            console.log(`[pts-asset] Updated meta userData.__type__ = "${ptsContent.__type__}" for ${data.name}`);
+        } catch (e) {
+            console.warn(`[pts-asset] Failed to save meta for uuid=${uuid}:`, e);
+        }
+    }
 
-    _obj.__type__ = _pts.__type__
+    // Ensure library .json has _native = ".pts" so the engine loads the native file
+    if (data.library && data.library['.json']) {
+        try {
+            const libJsonPath = data.library['.json'];
+            if (fs.existsSync(libJsonPath)) {
+                const libRaw = fs.readFileSync(libJsonPath, 'utf8');
+                const libObj = JSON.parse(libRaw);
 
-    fs.writeFileSync(data.library['.json'], JSON.stringify(_obj, null, 2), 'utf8')
+                let changed = false;
+
+                // Ensure _native is set to ".pts"
+                if (libObj._native !== '.pts') {
+                    libObj._native = '.pts';
+                    changed = true;
+                }
+
+                if (changed) {
+                    fs.writeFileSync(libJsonPath, JSON.stringify(libObj, null, 2), 'utf8');
+                    console.log(`[pts-asset] Patched library .json for ${data.name} (uuid=${uuid})`);
+                }
+            }
+        } catch (e) {
+            console.warn(`[pts-asset] Failed to patch library .json for uuid=${uuid}:`, e);
+        }
+    }
 }
 
 /**
