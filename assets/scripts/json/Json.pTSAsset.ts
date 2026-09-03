@@ -1,5 +1,6 @@
 
-import { _decorator, Asset, assetManager } from "cc";
+import { _decorator, Asset } from "cc";
+import "./Json.Register";
 
 const { ccclass } = _decorator
 

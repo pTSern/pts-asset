@@ -16,7 +16,6 @@
         "types": [
             "node",
             "@cocos/creator-types/editor"
-        ],
-        "ignoreDeprecations": "6.0"
+        ]
     }
 }

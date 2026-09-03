@@ -137,6 +137,16 @@
                 "methods": [
                     "pts_updater"
                 ]
+            },
+            "asset-db:asset-change": {
+                "methods": [
+                    "onAssetChanged"
+                ]
+            },
+            "open-panel": {
+                "methods": [
+                    "onOpenPanel"
+                ]
             }
         }
     }
