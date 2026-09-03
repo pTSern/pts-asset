@@ -1,4 +1,4 @@
-import { Asset, assetManager, Component, Node, js, director, Director, Vec2, Vec3, Color, Rect } from "cc";
+import { Asset, assetManager, Component, Node, js, director, Director, Vec2, Vec3, Color, Rect, assert } from "cc";
 import { Json_pTSAsset } from "./Json.pTSAsset";
 import { pEngine } from "db://pts-core/scripts/utils";
 
@@ -10,7 +10,7 @@ const _$tail = '.pts';
 // ─── 1. Downloader: fetch .pts files as JSON ───
 const _downloadPts = (url: string, options: Record<string, any>, onComplete: ((err: Error | null, data?: any) => void)) => {
     console.log("[pTSAsset] Downloader >>", url, options);
-    options.xhrResponseType = 'json';
+    options.xhrResponseType = 'pts';
     assetManager.downloader.downloadFile(url, options, options.onFileProgress, onComplete);
 };
 
@@ -151,25 +151,32 @@ function _hydrate(asset: Asset, ptsJson: any): void {
     }
 }
 
-// ─── 7. Pipeline Hook: Intercept Loaded Assets with _native=".pts" ───
+// ─── 7. Pipeline Hook: Intercept Loaded Assets (.pts native or embedded json) ───
 if (!assetManager.pipeline[__seal_]) {
     assetManager.pipeline.append((task, done) => {
+        // Ensure task.output is preserved so downstream pipes/callbacks don't receive null
+        task.output = task.output ?? task.input;
+
         const outputs = Array.isArray(task.output) ? task.output : [task.output];
-        console.log("[pTSAsset] Pipeline >>", task.source);
 
         for (const item of outputs) {
             const asset = item?.content || item;
             if (!(asset instanceof Asset)) continue;
-            if ((asset as any)._native !== _$tail) continue;
             if ((asset as any)[__hydrated_]) continue;
+            console.log("[pTSAsset] Pipeline >>", asset.nativeUrl.includes(_$tail) ? "Native .pts" : "Embedded JSON", asset);
 
-            const nativeData = (asset as any)._nativeAsset;
-            if (nativeData) {
-                _hydrate(asset, nativeData);
+            const isPtsNative = (asset as any)._native === _$tail;
+            const isPtsAsset = asset instanceof Json_pTSAsset;
+            const hasPtsData = !!(asset as any).json?.__type__;
+
+            if (!isPtsNative && !isPtsAsset && !hasPtsData) continue;
+
+            const ptsData = (asset as any)._nativeAsset || (asset as any).json;
+            if (ptsData) {
+                _hydrate(asset, ptsData);
             }
         }
 
-        task.output = task.input
         done();
     });
     assetManager.pipeline[__seal_] = true;

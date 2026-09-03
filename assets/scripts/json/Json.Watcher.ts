@@ -1,4 +1,4 @@
-import { _decorator, Component, JsonAsset } from "cc";
+import { _decorator, Asset, Component, JsonAsset } from "cc";
 import { pEngine } from "db://pts-core/scripts/utils";
 import { editor_property } from "db://pts-core/scripts/utils/pClass";
 
@@ -15,6 +15,9 @@ export class Json_Watcher extends Component {
         this._target = x;
         this._valid();
     }
+
+    @property({ type: Asset })
+    x: Asset = null
 
     @editor_property()
     get __event() { return this._target ? pEngine.Json.event.previewer(this._target) : null }

@@ -88,6 +88,11 @@
                 "path": "i18n:menu.extension/pTS Asset",
                 "label": "Log",
                 "message": "_cc:log"
+            },
+            {
+                "path": "i18n:menu.extension/pTS Asset",
+                "label": "Update .pts Assets",
+                "message": "pts::importer::lookup"
             }
         ],
         "messages": {
