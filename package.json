@@ -22,14 +22,17 @@
     },
     "panels": {
         "default": {
-            "title": "pTSPanel",
-            "main": "dist/panel/default",
+            "title": "pTS Asset",
+            "type": "dockable",
+            "main": "dist/panel.js",
             "flags": {
                 "save": true
             },
             "size": {
-                "width": 400,
-                "height": 600
+                "min-width": 360,
+                "min-height": 400,
+                "width": 420,
+                "height": 500
             }
         }
     },
@@ -73,6 +76,28 @@
                 },
                 "node": {
                     "Smart_JsonAsset": "./dist/smart_ja.js"
+                }
+            }
+        },
+        "profile": {
+            "project": {
+                "isAutoSave": {
+                    "default": true,
+                    "message": "profile::project::changed_isAutoSave",
+                    "label": "Auto Save in Inspector"
+                }
+            }
+        },
+        "project": {
+            "tab_1": {
+                "label": "pTS Asset",
+                "content": {
+                    "isAutoSave": {
+                        "ui": "ui-checkbox",
+                        "attributes": {
+                            "tooltip": "If true, changes made to .pts asset properties in Inspector mode are saved immediately. Default: true."
+                        }
+                    }
                 }
             }
         },
@@ -164,6 +189,11 @@
             "open-panel": {
                 "methods": [
                     "onOpenPanel"
+                ]
+            },
+            "profile::project::changed_isAutoSave": {
+                "methods": [
+                    "profile::project::changed_isAutoSave"
                 ]
             }
         }

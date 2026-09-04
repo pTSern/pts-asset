@@ -34,7 +34,7 @@ export interface MenuAssetInfo {
 let _cachedClasses: string[] = [];
 
 /**
- * Synchronously scan project assets/ for TypeScript classes extending Json_pTSAsset.
+ * Synchronously scan project assets/ for TypeScript classes extending pTSAsset.
  */
 export function scanProjectPtsClasses(): string[] {
     const assetsDir = path.join(Editor.Project.path, 'assets');
@@ -50,9 +50,9 @@ export function scanProjectPtsClasses(): string[] {
             } else if (entry.isFile() && entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts')) {
                 try {
                     const content = fs.readFileSync(fullPath, 'utf8');
-                    if (content.includes('Json_pTSAsset')) {
-                        // Match class ClassName extends Json_pTSAsset
-                        const classMatch = content.match(/class\s+([A-Za-z0-9_]+)\s+extends\s+Json_pTSAsset/);
+                    if (content.includes('pTSAsset')) {
+                        // Match class ClassName extends pTSAsset
+                        const classMatch = content.match(/class\s+([A-Za-z0-9_]+)\s+extends\s+pTSAsset/);
                         if (classMatch) {
                             const tsClassName = classMatch[1];
                             // Check if preceded by @ccclass("CustomName")
@@ -72,7 +72,7 @@ export function scanProjectPtsClasses(): string[] {
     try {
         walk(assetsDir);
     } catch (e) {
-        console.warn('[pts-asset] Error scanning project for Json_pTSAsset classes:', e);
+        console.warn('[pts-asset] Error scanning project for pTSAsset classes:', e);
     }
 
     return Array.from(classes).sort();
@@ -238,7 +238,7 @@ export function onCreateMenu(assetInfo?: MenuAssetInfo): IMenuItem[] {
                 label: 'Create pTS Asset',
                 submenu: [
                     {
-                        label: '(No Json_pTSAsset classes found)',
+                        label: '(No pTSAsset classes found)',
                         enabled: false
                     }
                 ]

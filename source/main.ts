@@ -119,6 +119,16 @@ export const methods: { [key: string]: (...any: any) => any } = {
         await checkPtsCoreDependency(true);
         Editor.Panel.open(pkg.name);
     },
+    async "profile::project::changed_isAutoSave"(key: string, value: boolean) {
+        console.log(`[${pkg.name}] Project profile isAutoSave changed to:`, value);
+    },
+    async getIsAutoSave() {
+        try {
+            const val = await Editor.Profile.getProject(pkg.name, 'isAutoSave');
+            if (typeof val === 'boolean') return val;
+        } catch {}
+        return true;
+    },
 
     /**
      * Called by asset-db:asset-change message.
