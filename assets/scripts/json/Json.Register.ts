@@ -1,4 +1,4 @@
-import { Asset, assetManager, Component, Node, js, director, Director, Vec2, Vec3, Color, Rect, assert } from "cc";
+import { Asset, assetManager, Component, Node, js, director, Director, assert } from "cc";
 import { Json_pTSAsset } from "./Json.pTSAsset";
 import { pEngine } from "db://pts-core/scripts/utils";
 
@@ -47,6 +47,67 @@ assetManager.factory.register({
 let _sceneReady = false;
 const _pendingHydrations: (() => void)[] = [];
 
+// ─── 5. Asset Reference Tracking & Dynamic Resolution ───
+interface PendingAssetRef {
+    target: any;
+    propKey: string;
+    uuid: string;
+}
+
+const _pendingAssetRefs: PendingAssetRef[] = [];
+
+function _registerPendingAssetRef(target: any, propKey: string, uuid: string) {
+    if (!target || !propKey || !uuid) return;
+    _pendingAssetRefs.push({ target, propKey, uuid });
+
+    if (typeof assetManager !== 'undefined' && typeof assetManager.loadAny === 'function') {
+        assetManager.loadAny({ uuid }, (err: any, loadedAsset: any) => {
+            if (!err && loadedAsset) {
+                target[propKey] = loadedAsset;
+            }
+        });
+    }
+}
+
+function _findAssetInBundles(uuid: string): Asset | null {
+    if (!assetManager.bundles) return null;
+    let found: Asset | null = null;
+    assetManager.bundles.forEach((bundle: any) => {
+        if (!found && bundle && typeof bundle.get === 'function') {
+            const a = bundle.get(uuid);
+            if (a) found = a;
+        }
+    });
+    return found;
+}
+
+function _findAssetByUuid(uuid: string): Asset | null {
+    if (!uuid) return null;
+    let asset = assetManager.assets ? assetManager.assets.get(uuid) : null;
+    if (!asset) {
+        asset = _findAssetInBundles(uuid);
+    }
+    return asset || null;
+}
+
+function _setupAssetLazyGetter(target: any, propKey: string, uuid: string) {
+    let _cached: any = null;
+
+    Object.defineProperty(target, propKey, {
+        configurable: true,
+        enumerable: true,
+        get() {
+            if (!_cached) {
+                _cached = _findAssetByUuid(uuid);
+            }
+            return _cached || null;
+        },
+        set(val: any) {
+            _cached = val;
+        }
+    });
+}
+
 function _isSceneReady(): boolean {
     return _sceneReady || !!director.getScene();
 }
@@ -63,23 +124,38 @@ director.on(Director.EVENT_AFTER_SCENE_LAUNCH, () => {
     _flushPending();
 });
 
-// ─── 5. Recursive Value Resolver ───
-function _resolveValue(val: any): any {
+// ─── 6. Recursive Value Resolver ───
+function _resolveValue(val: any, expectedCtor?: any, target?: any, propKey?: string): any {
     if (val === null || val === undefined) return val;
     if (typeof val !== 'object') return val;
 
     if (Array.isArray(val)) {
-        return val.map(item => _resolveValue(item));
+        return val.map((item, idx) => _resolveValue(item, expectedCtor, val, String(idx)));
     }
 
     const { __value__, __type__ } = val;
+
     if (__type__) {
-        const cls = js.getClassByName(__type__) as any;
+        // Asset references: { __type__, __value__: { uuid: "..." } } or { __type__, __value__: "uuid" }
+        const uuid = (__value__ && typeof __value__ === 'object' && typeof __value__.uuid === 'string')
+            ? __value__.uuid
+            : (typeof __value__ === 'string' && __value__.includes('-') ? __value__ : null);
+
+        if (uuid) {
+            const loaded = _findAssetByUuid(uuid);
+
+            if (target && propKey) {
+                _setupAssetLazyGetter(target, propKey, uuid);
+                if (!loaded) {
+                    _registerPendingAssetRef(target, propKey, uuid);
+                }
+            }
+            return loaded || null;
+        }
+
+        const cls = (js.getClassByName(__type__) || expectedCtor) as any;
         if (!cls) {
-            if (__type__ === 'cc.Vec2' && __value__) return new Vec2(__value__.x, __value__.y);
-            if (__type__ === 'cc.Vec3' && __value__) return new Vec3(__value__.x, __value__.y, __value__.z);
-            if (__type__ === 'cc.Color' && __value__) return new Color(__value__.r, __value__.g, __value__.b, __value__.a);
-            if (__type__ === 'cc.Rect' && __value__) return new Rect(__value__.x, __value__.y, __value__.width, __value__.height);
+            console.warn(`[pTSAsset] Class "${__type__}" not found in cc.js registry`);
             return __value__ !== undefined ? __value__ : val;
         }
 
@@ -88,12 +164,48 @@ function _resolveValue(val: any): any {
         }
 
         const instance = new cls();
-        if (__value__ && typeof __value__ === 'object') {
-            for (const k in __value__) {
-                instance[k] = _resolveValue(__value__[k]);
+        const vMap = (__value__ && typeof __value__ === 'object') ? __value__ : {};
+        const subProps = pEngine?.NodeUtils?.getAttr ? pEngine.NodeUtils.getAttr(cls) : null;
+        for (const k in vMap) {
+            const subCtor = subProps?.[k]?.ctor;
+            instance[k] = _resolveValue(vMap[k], subCtor, instance, k);
+        }
+
+        // Apply defaults for missing properties
+        if (subProps) {
+            for (const k in subProps) {
+                if (!(k in vMap)) {
+                    const def = subProps[k]?.default;
+                    instance[k] = typeof def === 'function' ? def() : def;
+                }
             }
         }
         return instance;
+    }
+
+    if (expectedCtor && typeof expectedCtor === 'function') {
+        if (js.isChildClassOf(expectedCtor, Component) || js.isChildClassOf(expectedCtor, Node)) {
+            return null;
+        }
+        try {
+            const instance = new expectedCtor();
+            const subProps = pEngine?.NodeUtils?.getAttr ? pEngine.NodeUtils.getAttr(expectedCtor) : null;
+            for (const k in val) {
+                const subCtor = subProps?.[k]?.ctor;
+                instance[k] = _resolveValue(val[k], subCtor, instance, k);
+            }
+            if (subProps) {
+                for (const k in subProps) {
+                    if (!(k in val)) {
+                        const def = subProps[k]?.default;
+                        instance[k] = typeof def === 'function' ? def() : def;
+                    }
+                }
+            }
+            return instance;
+        } catch {
+            // fallback
+        }
     }
 
     const out: Record<string, any> = {};
@@ -103,7 +215,7 @@ function _resolveValue(val: any): any {
     return out;
 }
 
-// ─── 6. Hydrate Asset ───
+// ─── 7. Hydrate Asset ───
 function _hydrate(asset: Asset, ptsJson: any): void {
     if (!asset || !ptsJson) return;
     if ((asset as any)[__hydrated_]) return;
@@ -145,7 +257,8 @@ function _hydrate(asset: Asset, ptsJson: any): void {
             }
 
             const rawVal = __value__[_key];
-            (asset as any)[_key] = _resolveValue(rawVal);
+            (asset as any)[_key] = _resolveValue(rawVal, propCtor, asset, _key);
+            asset['hydrate']?.();
         }
     };
 
@@ -156,7 +269,7 @@ function _hydrate(asset: Asset, ptsJson: any): void {
     }
 }
 
-// ─── 7. Pipeline Hook: Intercept Loaded Assets (.pts native or embedded json) ───
+// ─── 8. Pipeline Hook: Intercept Loaded Assets (.pts native or embedded json) ───
 if (!assetManager.pipeline[__seal_]) {
     assetManager.pipeline.append((task, done) => {
         // Ensure task.output is preserved so downstream pipes/callbacks don't receive null
@@ -164,20 +277,31 @@ if (!assetManager.pipeline[__seal_]) {
 
         const outputs = Array.isArray(task.output) ? task.output : [task.output];
 
-        for (const item of outputs) {
-            const asset = item?.content || item;
-            if (!(asset instanceof Asset)) continue;
-            if ((asset as any)[__hydrated_]) continue;
+        for (const _item of outputs) {
+            const _asset = _item?.content || _item;
+            if (!(_asset instanceof Asset)) continue;
 
-            const isPtsNative = (asset as any)._native === _$tail;
-            const isPtsAsset = asset instanceof Json_pTSAsset;
-            const hasPtsData = !!(asset as any).json?.__type__;
+            const _is_pTSNative = (_asset as any)._native === _$tail;
+            const _is_pTSAsset = _asset instanceof Json_pTSAsset;
+            const _has_pTSData = !!(_asset as any).json?.__type__;
 
-            if (!isPtsNative && !isPtsAsset && !hasPtsData) continue;
+            if ((_is_pTSNative || _is_pTSAsset || _has_pTSData) && !(_asset as any)[__hydrated_]) {
+                const _pTSData = (_asset as any)._nativeAsset || (_asset as any).json;
+                if (_pTSData) {
+                    _hydrate(_asset, _pTSData);
+                }
+            }
 
-            const ptsData = (asset as any)._nativeAsset || (asset as any).json;
-            if (ptsData) {
-                _hydrate(asset, ptsData);
+            // Resolve any pending asset references waiting for this loaded asset's UUID
+            const loadedUuid = (_asset as any)._uuid || _asset.uuid;
+            if (loadedUuid && _pendingAssetRefs.length > 0) {
+                for (let i = _pendingAssetRefs.length - 1; i >= 0; i--) {
+                    const ref = _pendingAssetRefs[i];
+                    if (ref.uuid === loadedUuid) {
+                        ref.target[ref.propKey] = _asset;
+                        _pendingAssetRefs.splice(i, 1);
+                    }
+                }
             }
         }
 
