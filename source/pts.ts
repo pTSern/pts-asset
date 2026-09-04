@@ -662,7 +662,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         'scene',
         'execute-scene-script',
         {
-            name: 'pts-asset',
+            name: 'pts-core',
             method: 'dump',
             args: [_cachedData.__type__]
         }
@@ -882,7 +882,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 'scene',
                 'execute-scene-script',
                 {
-                    name: 'pts-asset',
+                    name: 'pts-core',
                     method: 'dump',
                     args: [targetType]
                 }

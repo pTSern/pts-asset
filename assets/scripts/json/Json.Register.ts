@@ -1,5 +1,5 @@
 import { Asset, assetManager, Component, Node, js, director, Director, assert, RealCurve, Gradient, ColorKey, AlphaKey, Color } from "cc";
-import { pTSAsset } from "./pTSAsset";
+import { pTSAsset } from "db://pts-core/scripts/pTSAsset";
 import { pEngine } from "db://pts-core/scripts/utils";
 
 const __seal_ = Symbol('__sealed_');

@@ -1,5 +1,5 @@
 import { _decorator, Component, Enum, TweenEasing } from 'cc';
-import { pTSAsset } from '../json/pTSAsset';
+import { pTSAsset } from 'db://pts-core/scripts/pTSAsset';
 import { Type_CCEasing } from 'db://pts-core/scripts/Components/Type/Type.Easing';
 import { pClass, pConst } from 'db://pts-core/scripts/utils';
 import { Helper_Selector_Smart } from 'db://pts-core/scripts/helper/Selector/Helper.Selector.Smart';
