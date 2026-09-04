@@ -187,9 +187,9 @@ exports.methods = {
         return _cid;
     },
     get_registered_pts_classes() {
-        const baseCtor = cc.js.getClassByName('Json_pTSAsset');
+        const baseCtor = cc.js.getClassByName('pTSAsset');
         if (!baseCtor) {
-            console.warn('[pts-asset] Json_pTSAsset not found in cc.js');
+            console.warn('[pts-asset] pTSAsset not found in cc.js');
             return [];
         }
         const list = [];

@@ -1,4 +1,4 @@
-﻿import pkg from '../package.json';
+import pkg from '../package.json';
 
 export const template = `
 <div class="panel-container">
@@ -23,7 +23,7 @@ export const template = `
                 <ui-button class="btn-refresh-classes">Refresh Registered Classes</ui-button>
             </div>
             <div class="classes-container">
-                <div class="classes-title">Registered Classes (extends Json_pTSAsset):</div>
+                <div class="classes-title">Registered Classes (extends pTSAsset):</div>
                 <div class="classes-list">Scanning scene...</div>
             </div>
         </ui-section>
@@ -157,7 +157,7 @@ async function loadRegisteredClasses(panel: any) {
         if (Array.isArray(classes) && classes.length > 0) {
             panel.$.classesList.innerHTML = classes.map((c: string) => `<div>• <strong>${c}</strong></div>`).join('');
         } else {
-            panel.$.classesList.textContent = 'No classes extending Json_pTSAsset detected in scene.';
+            panel.$.classesList.textContent = 'No classes extending pTSAsset detected in scene.';
         }
     } catch (e) {
         panel.$.classesList.textContent = 'Unable to query scene (scene script not ready or no active scene).';
