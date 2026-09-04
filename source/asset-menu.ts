@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import pkg from '../package.json';
 import { collectValuesFromDump, extractAssetDependencies } from './pts';
 
 declare const Editor: any;
@@ -34,45 +35,147 @@ export interface MenuAssetInfo {
 let _cachedClasses: string[] = [];
 
 /**
- * Synchronously scan project assets/ for TypeScript classes extending pTSAsset.
+ * Extract mounted directory paths from an extension package.json contributions.asset-db.mount
  */
-export function scanProjectPtsClasses(): string[] {
-    const assetsDir = path.join(Editor.Project.path, 'assets');
-    const classes = new Set<string>();
+function getMountedAssetDirs(pkgJson: any, extDir: string): string[] {
+    const dirs: string[] = [];
+    const mount = pkgJson?.contributions?.['asset-db']?.mount;
+    if (!mount) return dirs;
 
-    function walk(dir: string) {
-        if (!fs.existsSync(dir)) return;
-        const entries = fs.readdirSync(dir, { withFileTypes: true });
-        for (const entry of entries) {
-            const fullPath = path.join(dir, entry.name);
-            if (entry.isDirectory()) {
-                walk(fullPath);
-            } else if (entry.isFile() && entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts')) {
-                try {
-                    const content = fs.readFileSync(fullPath, 'utf8');
-                    if (content.includes('pTSAsset')) {
-                        // Match class ClassName extends pTSAsset
-                        const classMatch = content.match(/class\s+([A-Za-z0-9_]+)\s+extends\s+pTSAsset/);
-                        if (classMatch) {
-                            const tsClassName = classMatch[1];
-                            // Check if preceded by @ccclass("CustomName")
-                            const ccMatches = [...content.matchAll(/@ccclass\s*\(\s*["']([^"']+)["']\s*\)/g)];
-                            if (ccMatches.length > 0) {
-                                classes.add(ccMatches[ccMatches.length - 1][1]);
-                            } else {
-                                classes.add(tsClassName);
-                            }
-                        }
-                    }
-                } catch {}
+    if (typeof mount === 'string') {
+        dirs.push(path.resolve(extDir, mount));
+    } else if (typeof mount.path === 'string') {
+        dirs.push(path.resolve(extDir, mount.path));
+    } else if (Array.isArray(mount)) {
+        for (const m of mount) {
+            if (typeof m === 'string') {
+                dirs.push(path.resolve(extDir, m));
+            } else if (m && typeof m.path === 'string') {
+                dirs.push(path.resolve(extDir, m.path));
+            }
+        }
+    } else if (typeof mount === 'object') {
+        for (const key of Object.keys(mount)) {
+            const m = mount[key];
+            if (typeof m === 'string') {
+                dirs.push(path.resolve(extDir, m));
+            } else if (m && typeof m.path === 'string') {
+                dirs.push(path.resolve(extDir, m.path));
             }
         }
     }
+    return dirs;
+}
+
+/**
+ * Synchronously scan project assets/ and extension mounted asset directories for TypeScript classes extending pTSAsset.
+ */
+export function scanProjectPtsClasses(): string[] {
+    const classes = new Set<string>();
+    const knownPtsClasses = new Set<string>(['pTSAsset']);
+    const searchDirs = new Set<string>();
+
+    const projectPath = typeof Editor !== 'undefined' && Editor.Project && Editor.Project.path
+        ? Editor.Project.path
+        : path.resolve(__dirname, '../../..');
+
+    // 1. Project assets directory
+    const projectAssetsDir = path.join(projectPath, 'assets');
+    if (fs.existsSync(projectAssetsDir)) {
+        searchDirs.add(projectAssetsDir);
+    }
+
+    // 2. Current extension (pkg.name e.g. "pts-asset") asset-db mount directory
+    const currentExtDir = path.resolve(__dirname, '..');
+    const currentMountDirs = getMountedAssetDirs(pkg, currentExtDir);
+    for (const d of currentMountDirs) {
+        if (fs.existsSync(d)) {
+            searchDirs.add(d);
+        }
+    }
+
+    // 3. Project extensions directory for peer extension mounts
+    try {
+        const extensionsDir = path.join(projectPath, 'extensions');
+        if (fs.existsSync(extensionsDir)) {
+            const extEntries = fs.readdirSync(extensionsDir, { withFileTypes: true });
+            for (const extEntry of extEntries) {
+                if (!extEntry.isDirectory()) continue;
+                const otherExtDir = path.join(extensionsDir, extEntry.name);
+                const otherPkgPath = path.join(otherExtDir, 'package.json');
+                if (fs.existsSync(otherPkgPath)) {
+                    try {
+                        const otherPkg = JSON.parse(fs.readFileSync(otherPkgPath, 'utf8'));
+                        const otherMountDirs = getMountedAssetDirs(otherPkg, otherExtDir);
+                        for (const d of otherMountDirs) {
+                            if (fs.existsSync(d)) {
+                                searchDirs.add(d);
+                            }
+                        }
+                    } catch {}
+                }
+            }
+        }
+    } catch {}
+
+    const allTsFiles: string[] = [];
+
+    function walk(dir: string) {
+        if (!fs.existsSync(dir)) return;
+        try {
+            const entries = fs.readdirSync(dir, { withFileTypes: true });
+            for (const entry of entries) {
+                const fullPath = path.join(dir, entry.name);
+                if (entry.isDirectory()) {
+                    walk(fullPath);
+                } else if (entry.isFile() && entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts')) {
+                    allTsFiles.push(fullPath);
+                }
+            }
+        } catch {}
+    }
 
     try {
-        walk(assetsDir);
+        for (const dir of searchDirs) {
+            walk(dir);
+        }
     } catch (e) {
-        console.warn('[pts-asset] Error scanning project for pTSAsset classes:', e);
+        console.warn('[pts-asset] Error scanning directories for pTSAsset classes:', e);
+    }
+
+    // Iterative scan to resolve classes extending pTSAsset or subclasses of pTSAsset
+    let foundNew = true;
+    while (foundNew) {
+        foundNew = false;
+        for (const fullPath of allTsFiles) {
+            try {
+                const content = fs.readFileSync(fullPath, 'utf8');
+                if (!content.includes('class')) continue;
+
+                const classRegex = /(?:export\s+|default\s+|abstract\s+)*class\s+([A-Za-z0-9_]+)\s+extends\s+([A-Za-z0-9_.]+)/g;
+                for (const match of content.matchAll(classRegex)) {
+                    const tsClassName = match[1];
+                    const parentClass = match[2].split('.').pop();
+                    if (parentClass && knownPtsClasses.has(parentClass)) {
+                        if (tsClassName === 'pTSAsset') continue;
+
+                        let finalClassName = tsClassName;
+                        const textBefore = content.substring(0, match.index);
+                        const ccMatches = [...textBefore.matchAll(/@ccclass\s*\(\s*['"]([^'"]+)['"]\s*\)/g)];
+                        if (ccMatches.length > 0) {
+                            finalClassName = ccMatches[ccMatches.length - 1][1];
+                        }
+
+                        if (!classes.has(finalClassName)) {
+                            classes.add(finalClassName);
+                            knownPtsClasses.add(tsClassName);
+                            knownPtsClasses.add(finalClassName);
+                            foundNew = true;
+                        }
+                    }
+                }
+            } catch {}
+        }
     }
 
     return Array.from(classes).sort();
