@@ -458,59 +458,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         renderView.call(this, _val);
     })
 
-    this.$.view.onchange = (e: any) => {
-        if (e.target.classList.contains('pts-array-size')) {
-            const key = e.target.dataset.key;
-            const newSize = parseInt(e.target.value);
-            const item = _lastDump.value[key];
-            const oldSize = item.value.length;
-            
-            if (newSize === oldSize) return;
-
-            if (newSize > oldSize) {
-                for (let i = oldSize; i < newSize; i++) {
-                    const newItem = JSON.parse(JSON.stringify(item.elementTypeData));
-                    item.value.push(newItem);
-                }
-            } else if (newSize < oldSize) {
-                item.value.length = newSize;
-            }
-            
-            // Manual DOM update to prevent full re-render and UI reset
-            const arraySection = e.target.closest('.pts-array');
-            const elementsContainer = arraySection.querySelector('.pts-array-elements');
-            const headerLabel = arraySection.querySelector('ui-label[slot="header"]');
-            
-            if (headerLabel) {
-                headerLabel.value = `${_format(key)} [${newSize}]`;
-            }
-
-            if (newSize > oldSize) {
-                for (let i = oldSize; i < newSize; i++) {
-                    const newProp = document.createElement('ui-prop') as any;
-                    newProp.setAttribute('type', 'dump');
-                    newProp.classList.add('pts-array-item');
-                    newProp.dataset.key = key;
-                    newProp.dataset.index = i.toString();
-                    elementsContainer.appendChild(newProp);
-                    
-                    // Render the new item immediately if possible, or wait for web component readiness
-                    if (newProp.render) {
-                        newProp.render(item.value[i]);
-                    } else {
-                        setTimeout(() => { if (newProp.render) newProp.render(item.value[i]); }, 10);
-                    }
-                }
-            } else {
-                const items = elementsContainer.querySelectorAll('.pts-array-item');
-                for (let i = oldSize - 1; i >= newSize; i--) {
-                    items[i].remove();
-                }
-            }
-        }
-    };
-
-    this.$.save.onclick = async () => {
+    const saveAsset = async () => {
         if (!_currentAsset || !_cachedData) return;
 
         console.groupCollapsed("[pTS Inspector] Saving Asset: ", _currentAsset.displayName);
@@ -591,6 +539,89 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         }
 
         console.groupEnd();
+    };
+
+    let _autoSaveTimer: any = null;
+    const triggerAutoSave = async () => {
+        try {
+            const profile = await Editor.Profile.getProject('pts-asset') as any || {};
+            const isAutoSave = typeof profile.isAutoSave === 'boolean' ? profile.isAutoSave : true;
+            if (!isAutoSave) return;
+
+            if (_autoSaveTimer) clearTimeout(_autoSaveTimer);
+            _autoSaveTimer = setTimeout(async () => {
+                await saveAsset();
+            }, 80);
+        } catch (e) {
+            console.error('[pTS Inspector] AutoSave error:', e);
+        }
+    };
+
+    this.$.view.onchange = (e: any) => {
+        if (e.target.classList.contains('pts-array-size')) {
+            const key = e.target.dataset.key;
+            const newSize = parseInt(e.target.value);
+            const item = _lastDump.value[key];
+            const oldSize = item.value.length;
+            
+            if (newSize !== oldSize) {
+                if (newSize > oldSize) {
+                    for (let i = oldSize; i < newSize; i++) {
+                        const newItem = JSON.parse(JSON.stringify(item.elementTypeData));
+                        item.value.push(newItem);
+                    }
+                } else if (newSize < oldSize) {
+                    item.value.length = newSize;
+                }
+                
+                // Manual DOM update to prevent full re-render and UI reset
+                const arraySection = e.target.closest('.pts-array');
+                const elementsContainer = arraySection.querySelector('.pts-array-elements');
+                const headerLabel = arraySection.querySelector('ui-label[slot="header"]');
+                
+                if (headerLabel) {
+                    headerLabel.value = `${_format(key)} [${newSize}]`;
+                }
+
+                if (newSize > oldSize) {
+                    for (let i = oldSize; i < newSize; i++) {
+                        const newProp = document.createElement('ui-prop') as any;
+                        newProp.setAttribute('type', 'dump');
+                        newProp.classList.add('pts-array-item');
+                        newProp.dataset.key = key;
+                        newProp.dataset.index = i.toString();
+                        elementsContainer.appendChild(newProp);
+                        
+                        // Render the new item immediately if possible, or wait for web component readiness
+                        if (newProp.render) {
+                            newProp.render(item.value[i]);
+                        } else {
+                            setTimeout(() => { if (newProp.render) newProp.render(item.value[i]); }, 10);
+                        }
+                    }
+                } else {
+                    const items = elementsContainer.querySelectorAll('.pts-array-item');
+                    for (let i = oldSize - 1; i >= newSize; i--) {
+                        items[i].remove();
+                    }
+                }
+            }
+        }
+        triggerAutoSave();
+    };
+
+    this.$.view.addEventListener('confirm', () => {
+        triggerAutoSave();
+    });
+
+    if (this.$.ptsa) {
+        this.$.ptsa.addEventListener('change', () => {
+            triggerAutoSave();
+        });
+    }
+
+    this.$.save.onclick = async () => {
+        await saveAsset();
     };
 
     this.$.fix.onclick = async () => {

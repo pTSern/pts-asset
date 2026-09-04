@@ -4,8 +4,8 @@ import "./Json.Register";
 
 const { ccclass } = _decorator
 
-@ccclass("Json_pTSAsset")
-export class Json_pTSAsset<_TInterfaces extends Record<string, any> = Record<string, pFlex.TFunc>> extends Asset {
+@ccclass("pTSAsset")
+export class pTSAsset<_TInterfaces extends Record<string, any> = Record<string, pFlex.TFunc>> extends Asset {
     protected _onLoad?(): void
     protected _isLoaded: boolean = false;
 

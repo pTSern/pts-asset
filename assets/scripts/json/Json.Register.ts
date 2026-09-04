@@ -1,5 +1,5 @@
 import { Asset, assetManager, Component, Node, js, director, Director, assert } from "cc";
-import { Json_pTSAsset } from "./Json.pTSAsset";
+import { pTSAsset } from "./Json.pTSAsset";
 import { pEngine } from "db://pts-core/scripts/utils";
 
 const __seal_ = Symbol('__sealed_');
@@ -31,9 +31,9 @@ const _parsePts = (file: any, options: Record<string, any>, onComplete: ((err: E
 
 assetManager.parser.register(_$tail, _parsePts);
 
-// ─── 3. Factory: create Json_pTSAsset from raw JSON (loadRemote fallback) ───
+// ─── 3. Factory: create pTSAsset from raw JSON (loadRemote fallback) ───
 function _creator(id: string, data: any, opt: Record<string, any>, onComplete: ((err: Error | null, data?: any) => void)) {
-    const _out = new Json_pTSAsset();
+    const _out = new pTSAsset();
     _out._nativeAsset = data;
     _hydrate(_out, data);
     onComplete(null, _out);
@@ -282,7 +282,7 @@ if (!assetManager.pipeline[__seal_]) {
             if (!(_asset instanceof Asset)) continue;
 
             const _is_pTSNative = (_asset as any)._native === _$tail;
-            const _is_pTSAsset = _asset instanceof Json_pTSAsset;
+            const _is_pTSAsset = _asset instanceof pTSAsset;
             const _has_pTSData = !!(_asset as any).json?.__type__;
 
             if ((_is_pTSNative || _is_pTSAsset || _has_pTSData) && !(_asset as any)[__hydrated_]) {
