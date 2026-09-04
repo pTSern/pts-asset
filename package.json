@@ -38,7 +38,8 @@
             "mount": {
                 "path": "./assets",
                 "readonly": true
-            }
+            },
+            "script": "./dist/asset-db.js"
         },
         "assets": {
             "types": [
