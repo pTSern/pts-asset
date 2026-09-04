@@ -4,7 +4,7 @@ import path from 'path';
 declare const Manager: any;
 declare const Editor: any;
 
-const _ptsTypeCache = new Map<string, { type: string, extends: string[] }>();
+const _ptsTypeCache = new Map<string, { type: string, extends: string[], depends: string[] }>();
 
 function _resolvePath(p: string): string {
     if (!p) return '';
@@ -15,7 +15,29 @@ function _resolvePath(p: string): string {
     return p;
 }
 
-export function getPtsTypeInfo(filePathOrUuid: string): { type: string, extends: string[] } | null {
+function extractAssetDependencies(val: any, out: Set<string> = new Set()): string[] {
+    if (!val || typeof val !== 'object') return Array.from(out);
+
+    if (Array.isArray(val)) {
+        for (const item of val) extractAssetDependencies(item, out);
+        return Array.from(out);
+    }
+
+    if (val.__value__ && typeof val.__value__ === 'object' && typeof val.__value__.uuid === 'string' && val.__value__.uuid) {
+        out.add(val.__value__.uuid);
+    } else if (typeof val.uuid === 'string' && val.uuid) {
+        out.add(val.uuid);
+    }
+
+    for (const k of Object.keys(val)) {
+        if (k === '__type__') continue;
+        extractAssetDependencies(val[k], out);
+    }
+
+    return Array.from(out);
+}
+
+export function getPtsTypeInfo(filePathOrUuid: string): { type: string, extends: string[], depends: string[] } | null {
     if (!filePathOrUuid) return null;
     if (_ptsTypeCache.has(filePathOrUuid)) {
         return _ptsTypeCache.get(filePathOrUuid)!;
@@ -34,29 +56,43 @@ export function getPtsTypeInfo(filePathOrUuid: string): { type: string, extends:
         }
 
         let targetType: string | null = null;
+        let depends: string[] = [];
 
         // 1. Try meta userData first
         if (metaPath && fs.existsSync(metaPath)) {
-            const raw = fs.readFileSync(metaPath, 'utf8');
-            const meta = JSON.parse(raw);
-            if (meta?.userData?.__type__) {
-                targetType = meta.userData.__type__;
-            }
+            try {
+                const raw = fs.readFileSync(metaPath, 'utf8');
+                const meta = JSON.parse(raw);
+                if (meta?.userData?.__type__) {
+                    targetType = meta.userData.__type__;
+                }
+                if (Array.isArray(meta?.userData?.__depends__)) {
+                    depends = meta.userData.__depends__;
+                } else if (Array.isArray(meta?.userData?.depends)) {
+                    depends = meta.userData.depends;
+                }
+            } catch {}
         }
 
         // 2. Try raw .pts file
-        if (!targetType && ptsPath && fs.existsSync(ptsPath)) {
-            const raw = fs.readFileSync(ptsPath, 'utf8');
-            const ptsContent = JSON.parse(raw);
-            if (ptsContent?.__type__) {
-                targetType = ptsContent.__type__;
-            }
+        if (ptsPath && fs.existsSync(ptsPath)) {
+            try {
+                const raw = fs.readFileSync(ptsPath, 'utf8');
+                const ptsContent = JSON.parse(raw);
+                if (!targetType && ptsContent?.__type__) {
+                    targetType = ptsContent.__type__;
+                }
+                if (depends.length === 0) {
+                    depends = extractAssetDependencies(ptsContent);
+                }
+            } catch {}
         }
 
         if (targetType) {
             const typeInfo = {
                 type: targetType,
-                extends: ['cc.Asset', 'pTSAsset', 'Json_pTSAsset', targetType]
+                extends: ['cc.Asset', 'pTSAsset', 'Json_pTSAsset', targetType],
+                depends
             };
             _ptsTypeCache.set(filePathOrUuid, typeInfo);
             return typeInfo;
@@ -76,6 +112,10 @@ function _enrichInfo(info: any) {
     if (typeInfo) {
         info.type = typeInfo.type;
         info.extends = typeInfo.extends;
+        if (typeInfo.depends && typeInfo.depends.length > 0) {
+            const existing = Array.isArray(info.depends) ? info.depends : [];
+            info.depends = Array.from(new Set([...existing, ...typeInfo.depends]));
+        }
     }
 }
 

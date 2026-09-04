@@ -185,6 +185,24 @@ exports.methods = {
         const _val = cc[what] || cc.js.getClassByName(what);
         const _cid = cc.js._getClassId(_val);
         return _cid;
+    },
+    get_registered_pts_classes() {
+        const baseCtor = cc.js.getClassByName('Json_pTSAsset');
+        if (!baseCtor) {
+            console.warn('[pts-asset] Json_pTSAsset not found in cc.js');
+            return [];
+        }
+        const list = [];
+        const nameMap = cc.js._nameToClass || {};
+        for (const name in nameMap) {
+            const cls = nameMap[name];
+            if (typeof cls === 'function' && cls !== baseCtor && cc.js.isChildClassOf(cls, baseCtor)) {
+                if (!list.includes(name)) {
+                    list.push(name);
+                }
+            }
+        }
+        return list.sort();
     }
 }
 

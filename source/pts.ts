@@ -116,11 +116,21 @@ function isNodeOrComponent(dump: any): boolean {
     return false;
 }
 
+function normalizeType(type: string): string {
+    if (!type) return type;
+    const valueTypes = ['Vec2', 'Vec3', 'Vec4', 'Color', 'Rect', 'Size'];
+    if (valueTypes.includes(type)) {
+        return 'cc.' + type;
+    }
+    return type;
+}
+
 function isValueType(dump: any): boolean {
     if (!dump) return false;
-    const type = dump.type;
+    const type = normalizeType(dump.type);
     return type === 'cc.Vec2' || type === 'cc.Vec3' || type === 'cc.Vec4' ||
-           type === 'cc.Color' || type === 'cc.Rect' || type === 'cc.Size';
+           type === 'cc.Color' || type === 'cc.Rect' || type === 'cc.Size' ||
+           (Array.isArray(dump.extends) && dump.extends.includes('cc.ValueType'));
 }
 
 function isNestedDump(val: any): boolean {
@@ -129,6 +139,39 @@ function isNestedDump(val: any): boolean {
     if (keys.length === 0) return false;
     const sample = val[keys[0]];
     return sample && typeof sample === 'object' && ('type' in sample || 'value' in sample || 'name' in sample);
+}
+
+function isAssetType(dump: any): boolean {
+    if (!dump) return false;
+    if (isNodeOrComponent(dump)) return false;
+    if (dump.extends?.includes('cc.Asset') || dump.type === 'cc.Asset') return true;
+    if (dump.value && typeof dump.value === 'object' && 'uuid' in dump.value) return true;
+    return false;
+}
+
+/**
+ * Recursively extract all referenced asset UUIDs from a .pts data structure.
+ */
+export function extractAssetDependencies(val: any, out: Set<string> = new Set()): string[] {
+    if (!val || typeof val !== 'object') return Array.from(out);
+
+    if (Array.isArray(val)) {
+        for (const item of val) extractAssetDependencies(item, out);
+        return Array.from(out);
+    }
+
+    if (val.__value__ && typeof val.__value__ === 'object' && typeof val.__value__.uuid === 'string' && val.__value__.uuid) {
+        out.add(val.__value__.uuid);
+    } else if (typeof val.uuid === 'string' && val.uuid) {
+        out.add(val.uuid);
+    }
+
+    for (const k of Object.keys(val)) {
+        if (k === '__type__') continue;
+        extractAssetDependencies(val[k], out);
+    }
+
+    return Array.from(out);
 }
 
 /**
@@ -161,12 +204,17 @@ function populateDumpWithSaved(dump: any, savedVal: any) {
         return;
     }
 
+    // Extract unwrapped data if wrapped in { __type__, __value__ }
+    const vData = (savedVal && typeof savedVal === 'object' && '__value__' in savedVal)
+        ? savedVal.__value__
+        : savedVal;
+
     // 3. Nested @ccclass struct (e.g. Test___Helper)
     if (isNestedDump(dump.value)) {
         for (const childKey of Object.keys(dump.value)) {
             if (_ignores.includes(childKey)) continue;
             const childDump = dump.value[childKey];
-            const childSaved = (savedVal && typeof savedVal === 'object') ? savedVal[childKey] : undefined;
+            const childSaved = (vData && typeof vData === 'object') ? vData[childKey] : undefined;
             populateDumpWithSaved(childDump, childSaved);
         }
         return;
@@ -174,10 +222,18 @@ function populateDumpWithSaved(dump: any, savedVal: any) {
 
     // 4. Value types (Vec2, Vec3, Color, Rect, Size)
     if (isValueType(dump)) {
-        if (savedVal && typeof savedVal === 'object' && Object.keys(savedVal).length > 0) {
+        if (dump.value && typeof dump.value === 'object' && vData && typeof vData === 'object') {
             for (const k of Object.keys(dump.value)) {
-                if (typeof savedVal[k] === 'number') {
-                    dump.value[k] = savedVal[k];
+                let targetVal: number | undefined;
+                if (typeof vData[k] === 'number') {
+                    targetVal = vData[k];
+                }
+                if (targetVal !== undefined) {
+                    if (dump.value[k] && typeof dump.value[k] === 'object' && 'value' in dump.value[k]) {
+                        dump.value[k].value = targetVal;
+                    } else {
+                        dump.value[k] = targetVal;
+                    }
                 }
             }
         }
@@ -185,20 +241,26 @@ function populateDumpWithSaved(dump: any, savedVal: any) {
     }
 
     // 5. Asset references (cc.Asset, Texture2D, Prefab, etc.)
-    if (dump.extends?.includes('cc.Asset') || dump.type === 'cc.Asset' || (dump.value && typeof dump.value === 'object' && 'uuid' in dump.value)) {
-        if (typeof savedVal === 'string' && savedVal) {
-            dump.value = { uuid: savedVal };
-        } else if (savedVal && typeof savedVal === 'object' && savedVal.uuid) {
-            dump.value = { uuid: savedVal.uuid };
-        } else {
-            dump.value = { uuid: "" };
+    if (isAssetType(dump)) {
+        let uuid = "";
+        if (typeof savedVal === 'string') {
+            uuid = savedVal;
+        } else if (savedVal && typeof savedVal === 'object') {
+            if (savedVal.__value__ && typeof savedVal.__value__ === 'object' && savedVal.__value__.uuid) {
+                uuid = savedVal.__value__.uuid;
+            } else if (typeof savedVal.__value__ === 'string') {
+                uuid = savedVal.__value__;
+            } else if (savedVal.uuid) {
+                uuid = savedVal.uuid;
+            }
         }
+        dump.value = { uuid: uuid || "" };
         return;
     }
 
     // 6. Primitives (Number, String, Boolean, Enum)
-    if (typeof savedVal !== 'undefined' && savedVal !== null) {
-        dump.value = savedVal;
+    if (typeof vData !== 'undefined' && vData !== null) {
+        dump.value = vData;
     } else {
         if (typeof dump.default !== 'undefined' && dump.default !== null) {
             dump.value = typeof dump.default === 'function' ? dump.default() : dump.default;
@@ -214,9 +276,10 @@ function populateDumpWithSaved(dump: any, savedVal: any) {
 
 /**
  * Recursively extract serialized values from dump structure.
- * Strips out Node and Component references entirely.
+ * Wraps complex types in { __type__, __value__ } format.
+ * Strips out Node and Component references entirely (sets to null).
  */
-function extractDumpValue(dump: any): any {
+export function extractDumpValue(dump: any): any {
     if (!dump) return null;
 
     if (isNodeOrComponent(dump)) {
@@ -233,25 +296,58 @@ function extractDumpValue(dump: any): any {
         for (const k of Object.keys(dump.value)) {
             if (_ignores.includes(k)) continue;
             const childDump = dump.value[k];
-            if (isNodeOrComponent(childDump)) continue;
             out[k] = extractDumpValue(childDump);
         }
-        return out;
+        return {
+            __type__: normalizeType(dump.type),
+            __value__: out
+        };
     }
 
     if (isValueType(dump)) {
         const out: Record<string, number> = {};
-        for (const k of Object.keys(dump.value)) {
-            out[k] = typeof dump.value[k] === 'number' ? dump.value[k] : (dump.value[k]?.value ?? 0);
+        if (dump.value && typeof dump.value === 'object') {
+            for (const k of Object.keys(dump.value)) {
+                const sub = dump.value[k];
+                if (typeof sub === 'number') {
+                    out[k] = sub;
+                } else if (sub && typeof sub === 'object' && typeof sub.value === 'number') {
+                    out[k] = sub.value;
+                } else if (sub && typeof sub === 'object' && typeof sub.default === 'number') {
+                    out[k] = sub.default;
+                } else {
+                    out[k] = 0;
+                }
+            }
         }
-        return out;
+        return {
+            __type__: normalizeType(dump.type),
+            __value__: out
+        };
     }
 
-    if (dump.value && typeof dump.value === 'object' && 'uuid' in dump.value) {
-        return dump.value.uuid || "";
+    if (isAssetType(dump)) {
+        const uuid = dump.value && typeof dump.value === 'object' 
+            ? dump.value.uuid 
+            : (typeof dump.value === 'string' ? dump.value : "");
+        if (!uuid) return null;
+        return {
+            __type__: normalizeType(dump.type),
+            __value__: { uuid }
+        };
     }
 
     return dump.value !== undefined ? dump.value : dump.default;
+}
+
+export function collectValuesFromDump(dumpValue: any): Record<string, any> {
+    const result: Record<string, any> = {};
+    if (!dumpValue) return result;
+    for (const key of Object.keys(dumpValue)) {
+        if (_ignores.includes(key)) continue;
+        result[key] = extractDumpValue(dumpValue[key]);
+    }
+    return result;
 }
 
 async function renderView(this: PanelThis, dumpValue: any) {
@@ -344,7 +440,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             method: 'dump',
             args: [_cachedData.__type__]
         }
-    ).then(_out => {
+    ).then((_out: any) => {
         console.log("DUMPER OUT: ", _out);
 
         if(!_out) {
@@ -417,11 +513,11 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
     this.$.save.onclick = async () => {
         if (!_currentAsset || !_cachedData) return;
 
-        console.groupCollapsed("Saving Asset: ", _currentAsset.displayName);
+        console.groupCollapsed("[pTS Inspector] Saving Asset: ", _currentAsset.displayName);
         console.log('Collecting values for saving...');
         
-        // Update dumper if changed in UI
-        if (this.$.ptsa) {
+        // Update type if changed in UI
+        if (this.$.ptsa && this.$.ptsa.value) {
             _cachedData.__type__ = this.$.ptsa.value;
         }
 
@@ -433,9 +529,9 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         // Collect values from basic props
         this.$.view.querySelectorAll('.pts-basic-prop').forEach((el: any) => {
             const key = el.dataset.key;
-            const dump = el.dump;
+            const dump = el.dump || (_lastDump?.value && _lastDump.value[key]);
             if (dump && dump.name) {
-                _cachedData.__value__[dump.name] = _dump(dump);
+                _cachedData.__value__[dump.name] = extractDumpValue(dump);
             }
         });
 
@@ -444,10 +540,10 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         this.$.view.querySelectorAll('.pts-array-item').forEach((el: any) => {
             const key = el.dataset.key;
             const index = parseInt(el.dataset.index);
-            const dump = el.dump;
+            const dump = el.dump || (_lastDump?.value && _lastDump.value[key]?.value?.[index]);
             if (dump) {
                 if (!arrayValues[key]) arrayValues[key] = [];
-                arrayValues[key][index] = _dump(dump);
+                arrayValues[key][index] = extractDumpValue(dump);
             }
         });
 
@@ -456,17 +552,141 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             _cachedData.__value__[key] = arrayValues[key];
         }
 
+        // Preserve any properties from _lastDump.value not captured in DOM
+        if (_lastDump && _lastDump.value) {
+            for (const key of Object.keys(_lastDump.value)) {
+                if (_ignores.includes(key)) continue;
+                if (!(_cachedData.__value__.hasOwnProperty(key))) {
+                    _cachedData.__value__[key] = extractDumpValue(_lastDump.value[key]);
+                }
+            }
+        }
+
         console.log('Final data to save:', _cachedData);
         const content = JSON.stringify(_cachedData, null, 4);
         try {
             await Editor.Message.request('asset-db', 'save-asset', _currentAsset.uuid, content);
             console.log('Asset saved successfully:', _currentAsset.displayName);
+            if (this.$.jsonDisplay) {
+                this.$.jsonDisplay.textContent = content;
+            }
         } catch (err) {
             console.error('Failed to save asset:', err);
         }
+
+        // Extract and save dependencies to meta
+        try {
+            const depends = extractAssetDependencies(_cachedData);
+            const meta = await Editor.Message.request('asset-db', 'query-asset-meta', _currentAsset.uuid);
+            if (meta) {
+                meta.userData = meta.userData || {};
+                meta.userData.__type__ = _cachedData.__type__;
+                meta.userData.__depends__ = depends;
+                meta.userData.depends = depends;
+                await Editor.Message.request('asset-db', 'save-asset-meta', _currentAsset.uuid, JSON.stringify(meta));
+                console.log(`[pTS Inspector] Saved meta with depends:`, depends);
+            }
+        } catch (err) {
+            console.error('[pTS Inspector] Failed to save meta dependencies:', err);
+        }
+
+        console.groupEnd();
     };
 
-    console.groupEnd()
+    this.$.fix.onclick = async () => {
+        if (!_currentAsset) return;
+
+        console.groupCollapsed("[pTS Inspector] Fixing Asset: ", _currentAsset.displayName);
+
+        // 1. Determine target type
+        const targetType = (this.$.ptsa && this.$.ptsa.value) 
+            || (_cachedData && _cachedData.__type__) 
+            || (this.metaList && this.metaList[0]?.userData?.__type__) 
+            || "";
+
+        if (!targetType) {
+            console.warn("[pTS Inspector] Fix failed: Unknown __type__ for asset.");
+            console.groupEnd();
+            return;
+        }
+
+        console.log(`Fixing asset ${_currentAsset.displayName} with type: ${targetType}`);
+
+        // 2. Fetch fresh class dump from scene script
+        let dumpOut: any = null;
+        try {
+            dumpOut = await Editor.Message.request(
+                'scene',
+                'execute-scene-script',
+                {
+                    name: 'pts-asset',
+                    method: 'dump',
+                    args: [targetType]
+                }
+            );
+        } catch (e) {
+            console.error("[pTS Inspector] Failed to dump class from scene script:", e);
+        }
+
+        if (!dumpOut || !dumpOut.value) {
+            console.warn(`[pTS Inspector] Could not get dump for type "${targetType}". Class might not be loaded in scene.`);
+            console.groupEnd();
+            return;
+        }
+
+        // 3. Merge existing saved data with the fresh dump (fills missing fields with defaults, sanitizes Node/Component to null)
+        const currentSaved = (_cachedData && _cachedData.__value__) || {};
+        for (const key of Object.keys(dumpOut.value)) {
+            if (_ignores.includes(key)) continue;
+            populateDumpWithSaved(dumpOut.value[key], currentSaved[key]);
+        }
+
+        // 4. Extract sanitized and complete values
+        const cleanValues = collectValuesFromDump(dumpOut.value);
+
+        // 5. Update _cachedData and save .pts asset
+        _cachedData = {
+            __type__: targetType,
+            __value__: cleanValues
+        };
+
+        const ptsContent = JSON.stringify(_cachedData, null, 4);
+        try {
+            await Editor.Message.request('asset-db', 'save-asset', _currentAsset.uuid, ptsContent);
+            console.log('[pTS Inspector] Fixed .pts content saved successfully');
+        } catch (err) {
+            console.error('[pTS Inspector] Failed to save fixed .pts asset:', err);
+        }
+
+        // 6. Ensure meta file has userData.__type__ and __depends__
+        try {
+            const depends = extractAssetDependencies(_cachedData);
+            const meta = await Editor.Message.request('asset-db', 'query-asset-meta', _currentAsset.uuid);
+            if (meta) {
+                meta.userData = meta.userData || {};
+                meta.userData.__type__ = targetType;
+                meta.userData.__depends__ = depends;
+                meta.userData.depends = depends;
+                await Editor.Message.request('asset-db', 'save-asset-meta', _currentAsset.uuid, JSON.stringify(meta));
+                console.log(`[pTS Inspector] Fixed meta userData.__type__ = "${targetType}", __depends__=`, depends);
+            }
+        } catch (err) {
+            console.error('[pTS Inspector] Failed to save meta for uuid=' + _currentAsset.uuid, err);
+        }
+
+
+        // 7. Update UI
+        _lastDump = dumpOut;
+        await renderView.call(this, dumpOut.value);
+        if (this.$.jsonDisplay) {
+            this.$.jsonDisplay.textContent = ptsContent;
+        }
+
+        console.log('[pTS Inspector] Asset fixed and re-rendered successfully!');
+        console.groupEnd();
+    };
+
+    console.groupEnd();
 };
 
 function _format(str: string) {
@@ -477,246 +697,8 @@ function _format(str: string) {
     .join(' ');
 }
 
-function _actNumberResolve(_ret: any, _key: string, _fullPath: string) {
-    return `
-        <ui-prop>
-            <ui-label slot="label">${_format(_key)}</ui-label>
-            <ui-num-input class="pts-number" slot="content" value="${_ret}" data-path="${_fullPath}"></ui-num-input>
-        </ui-prop>
-        `
-}
-
-function _actStringResolve(_ret: any, _key: string, _fullPath: string, readonly: boolean = false, multiline: boolean = false) {
-    return `
-        <ui-prop>
-            <ui-label slot="label">${_format(_key)}</ui-label>
-            ${ multiline ?
-                `<ui-textarea class="pts-string" data-path="${_fullPath}" slot="content" value="${_ret}" autoheight style="display: block;"></ui-textarea>` 
-                    :
-                `<ui-input class="pts-string" data-path="${_fullPath}" slot="content" value="${_ret}" ${readonly ? "readonly " : ""}></ui-input>`}
-        </ui-prop>
-    `
-}
-
-function _actBooleanResolve(_ret: any, _key: string, _fullPath: string) {
-    return `
-        <ui-prop>
-            <ui-label slot="label">${_format(_key)}</ui-label>
-            <ui-checkbox class="pts-checkbox" data-path="${_fullPath}" slot="content"${_ret ? ' checked' : ''}></ui-checkbox>
-        </ui-prop>
-    `
-}
-
-async function _actObjectResolve(_ret: any, _key: string, _fullPath: string): Promise<string> {
-    if(_ret == null) {
-        return `
-            <ui-prop tooltip="This property is null. Please edit it manualy" readonly>
-                <div slot="label">
-                    <ui-label>${_format(_key)}</ui-label>
-                    <ui-icon default="operation" value="warn"></ui-icon>
-                </div>
-                <ui-input slot="content" type="danger" outline value="NULL"></ui-input>
-            </ui-prop>
-            `
-    }
-
-    if (Array.isArray(_ret)) {
-        let _div = `
-            <ui-section expand>
-                <ui-label slot="header">${_format(_key)} [${_ret.length}]</ui-label>
-                <div class="${_key}">
-                    <ui-prop>
-                        <ui-label slot="label">Size</ui-label>
-                        <ui-num-input class="pts-array-size" slot="content" value="${_ret.length}" data-path="${_fullPath}" step="1" min="0"></ui-num-input>
-                    </ui-prop>
-        `;
-        
-        for (let i = 0; i < _ret.length; i++) {
-            _div += await _actObjectResolve(_ret[i], `[${i}]`, `${_fullPath}.${i}`);
-        }
-
-        _div += `
-                </div>
-            </ui-section>
-        `;
-        return _div;
-    }
-
-    if(_ret.__type__) {
-        const _vPath = `${_fullPath}.__value__`;
-        const _val = _ret.__value__;
-
-        switch(_ret.__type__) {
-            case "cc.Node": {
-                return `
-                    <ui-prop>
-                        <ui-label slot="label">${_format(_key)}</ui-label>
-                        <ui-node slot="content" class="pts-node" data-path="${_vPath}" droppable="cc.Node" value="${_val}"></ui-node>
-                    </ui-prop>
-                `
-            }
-            case "cc.Vec2": {
-                return `
-                    <ui-prop>
-                        <ui-label slot="label">${_format(_key)}</ui-label>
-                        <div slot="content" style="display: flex; gap: 4px;">
-                            <ui-num-input class="pts-number" data-path="${_vPath}.x" value="${_val.x}" label="X"></ui-num-input>
-                            <ui-num-input class="pts-number" data-path="${_vPath}.y" value="${_val.y}" label="Y"></ui-num-input>
-                        </div>
-                    </ui-prop>
-                    `
-            }
-            case "cc.Vec3": {
-                return `
-                    <ui-prop>
-                        <ui-label slot="label">${_format(_key)}</ui-label>
-                        <div slot="content" style="display: flex; gap: 4px;">
-                            <ui-num-input class="pts-number" data-path="${_vPath}.x" value="${_val.x}" label="X"></ui-num-input>
-                            <ui-num-input class="pts-number" data-path="${_vPath}.y" value="${_val.y}" label="Y"></ui-num-input>
-                            <ui-num-input class="pts-number" data-path="${_vPath}.z" value="${_val.z}" label="Z"></ui-num-input>
-                        </div>
-                    </ui-prop>
-                    `
-            }
-            case "cc.Rect": {
-                return `
-                    <ui-prop>
-                        <ui-label slot="label">${_format(_key)}</ui-label>
-                        <div slot="content" style="display: flex; gap: 4px;">
-                            <ui-num-input preci="6" class="pts-number" data-path="${_vPath}.x" value="${_val.x}" label="X"></ui-num-input>
-                            <ui-num-input preci="6" class="pts-number" data-path="${_vPath}.y" value="${_val.y}" label="Y"></ui-num-input>
-                            <ui-num-input preci="6" class="pts-number" data-path="${_vPath}.width" value="${_val.width}" label="W"></ui-num-input>
-                            <ui-num-input preci="6" class="pts-number" data-path="${_vPath}.height" value="${_val.height}" label="H"></ui-num-input>
-                        </div>
-                    </ui-prop>
-                    `
-            }
-        }
-
-        const _isComp = await Editor.Message.request(
-            'scene',
-            'execute-scene-script',
-            {
-                name: 'pts-asset',
-                method: 'is_component',
-                args: [_ret.__type__]
-            }
-        ) as boolean
-
-        if(_isComp) {
-            return `
-                <ui-prop>
-                    <ui-label slot="label">${_format(_key)}</ui-label>
-                    <ui-component class="pts-component" data-path="${_vPath}" slot="content" droppable="${_ret.__type__}" value="${_val}"></ui-component>
-                </ui-prop>
-            `
-        }
 
 
-        const _out = await Editor.Message.request(
-            'scene',
-            'execute-scene-script',
-            {
-                name: 'pts-asset',
-                method: 'info',
-                args: [_ret.__type__] 
-            }
-        ) as any;
-
-
-        if(_out) {
-            let _div =`
-                <ui-section expand>
-                    <ui-label slot="label" value="${_format(_key)}">${_format(_key)}</ui-label>
-                    <div class="${_key}">
-                `;
-
-            const _copy: Record<string, any> = {}
-            for(const _k in _out) {
-                const _obj = _out[_k];
-                _copy[_k] = _val[_k] || _obj.default;
-            }
-
-            _div += await _toHTML(_copy, _vPath);
-            _div += `
-                    </div>
-                </ui-section>
-            `
-            return _div;
-        }
-
-        return `
-            <ui-prop tooltip="Unsupported Type: ${_ret.__type__}" readonly>
-                <div slot="label">
-                    <ui-label>${_format(_key)}</ui-label>
-                    <ui-icon default="operation" value="warn"></ui-icon>
-                </div>
-                <ui-input slot="content" type="danger" outline value="UNSUPPORTED"></ui-input>
-            </ui-prop>
-        `;
-    }
-
-    const _out: string = await _toHTML(_ret, _fullPath);
-    return `
-        <ui-section expand>
-            <ui-label slot="header">${_format(_key)}</ui-label>
-            <div class="${_key}">
-                ${_out}
-            </div>
-        </ui-section>
-        `
-}
-
-async function _toHTML(_obj: any, _path: string = ""): Promise<string> {
-    if (Array.isArray(_obj)) {
-        let _div = `
-            <ui-prop>
-                <ui-label slot="label">Size</ui-label>
-                <ui-num-input class="pts-array-size" slot="content" value="${_obj.length}" data-path="${_path}" step="1" min="0"></ui-num-input>
-            </ui-prop>
-        `;
-        const _asyncs = _obj.map(async (item, index) => {
-            return await _actObjectResolve(item, `[${index}]`, `${_path}.${index}`);
-        });
-        const _results = await Promise.all(_asyncs);
-        return _div + _results.join('');
-    }
-
-    const _keys = Object.keys(_obj);
-    const _asyncs: Promise<string>[] = _keys.map( async (_key): Promise<string> => {
-        const _ret = _obj[_key];
-        const _fullPath = _path ? `${_path}.${_key}` : _key;
-        switch(typeof _ret) {
-            case 'string': {
-                return _actStringResolve(_ret, _key, _fullPath, false);
-            }
-            case 'number': {
-                return _actNumberResolve(_ret, _key, _fullPath);
-            }
-            case 'bigint': {
-                return _actNumberResolve(_ret, _key, _fullPath);
-            }
-            case 'boolean': {
-                return _actBooleanResolve(_ret, _key, _fullPath);
-            }
-            case 'symbol': {
-                return _actStringResolve(_ret.toString(), _key, _fullPath, true);
-            }
-            case 'undefined': {
-                return _actStringResolve("UNDEFINED", _key, _fullPath, true);
-            }
-            case 'object': {
-                return await _actObjectResolve(_ret, _key, _fullPath);
-            }
-            case 'function': {
-                return _actStringResolve(_ret.toString(), _key, _fullPath, true, true);
-            }
-            default: return "";
-        }
-    } )
-    const _results: string[] = await Promise.all(_asyncs);
-    return _results.join('');
-}
 
 export function onChange(...ayny: any[]) {
     console.log('ui-asset changed-2: ', ...ayny);

@@ -42,6 +42,13 @@
             "script": "./dist/asset-db.js"
         },
         "assets": {
+            "menu": {
+                "methods": "./dist/asset-menu.js",
+                "createMenu": "onCreateMenu",
+                "assetMenu": "onAssetMenu",
+                "dbMenu": "onDBMenu",
+                "panelMenu": "onPanelMenu"
+            },
             "types": [
                 {
                     "type": "pts",
@@ -122,6 +129,11 @@
             "createz": {
                 "methods": [
                     "onCreateMenuX"
+                ]
+            },
+            "create-pts-asset": {
+                "methods": [
+                    "createPtsAsset"
                 ]
             },
             "selection:select": {

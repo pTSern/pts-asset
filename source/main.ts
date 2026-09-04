@@ -84,6 +84,10 @@ export const methods: { [key: string]: (...any: any) => any } = {
     onCreateMenuX(ai: any) {
         console.log('onCreateMenu', ai);
     },
+    async createPtsAsset(assetInfo: any, className: string) {
+        const { createAndInitPtsAsset } = require('./asset-menu');
+        await createAndInitPtsAsset(assetInfo, className);
+    },
     async register(url, ...args: any[]) {
         console.log("SCRIPTABLE >>", url, ...args)
         const _out = await Editor.Message.request('asset-db', 'query-asset-info', url)
@@ -160,6 +164,28 @@ export const methods: { [key: string]: (...any: any) => any } = {
  */
 const _patchingUuids = new Set<string>();
 
+function extractAssetDependencies(val: any, out: Set<string> = new Set()): string[] {
+    if (!val || typeof val !== 'object') return Array.from(out);
+
+    if (Array.isArray(val)) {
+        for (const item of val) extractAssetDependencies(item, out);
+        return Array.from(out);
+    }
+
+    if (val.__value__ && typeof val.__value__ === 'object' && typeof val.__value__.uuid === 'string' && val.__value__.uuid) {
+        out.add(val.__value__.uuid);
+    } else if (typeof val.uuid === 'string' && val.uuid) {
+        out.add(val.uuid);
+    }
+
+    for (const k of Object.keys(val)) {
+        if (k === '__type__') continue;
+        extractAssetDependencies(val[k], out);
+    }
+
+    return Array.from(out);
+}
+
 async function _patchPtsLibrary(uuid: string, data: AssetInfo, meta: IAssetMeta) {
     if (!data || !meta) return;
     if (!meta.files || !meta.files.includes('.pts')) return;
@@ -172,9 +198,7 @@ async function _patchPtsLibrary(uuid: string, data: AssetInfo, meta: IAssetMeta)
     }
 }
 
-async function _patchPtsLibraryInternal(uuid: string, data: AssetInfo, meta: IAssetMeta) {
-
-    // Read the source .pts file to extract __type__
+async function _patchPtsLibraryInternal(uuid: string, data: any, meta: any) {
     let ptsContent: any = null;
     try {
         const sourceFile = data.file;
@@ -191,20 +215,24 @@ async function _patchPtsLibraryInternal(uuid: string, data: AssetInfo, meta: IAs
 
     if (!ptsContent || !ptsContent.__type__) return;
 
-    // Store __type__ in meta.userData for reference
-    const needMetaUpdate = meta.userData?.__type__ !== ptsContent.__type__;
+    const depends = extractAssetDependencies(ptsContent);
+
+    // Store __type__ and __depends__ in meta.userData for reference
+    const needMetaUpdate = meta.userData?.__type__ !== ptsContent.__type__ || JSON.stringify(meta.userData?.__depends__) !== JSON.stringify(depends);
     if (needMetaUpdate) {
         meta.userData = meta.userData || {};
         meta.userData.__type__ = ptsContent.__type__;
+        meta.userData.__depends__ = depends;
+        meta.userData.depends = depends;
         try {
             await Editor.Message.request('asset-db', 'save-asset-meta', uuid, JSON.stringify(meta));
-            console.log(`[pts-asset] Updated meta userData.__type__ = "${ptsContent.__type__}" for ${data.name}`);
+            console.log(`[pts-asset] Updated meta userData.__type__ = "${ptsContent.__type__}", depends=${depends.length} for ${data.name}`);
         } catch (e) {
             console.warn(`[pts-asset] Failed to save meta for uuid=${uuid}:`, e);
         }
     }
 
-    // Ensure library .json has _native = ".pts" so the engine loads the native file
+    // Ensure library .json has _native = ".pts" and _depends
     if (data.library && data.library['.json']) {
         try {
             const libJsonPath = data.library['.json'];
@@ -217,6 +245,11 @@ async function _patchPtsLibraryInternal(uuid: string, data: AssetInfo, meta: IAs
                 // Ensure _native is set to ".pts"
                 if (libObj._native !== '.pts') {
                     libObj._native = '.pts';
+                    changed = true;
+                }
+
+                if (JSON.stringify(libObj._depends) !== JSON.stringify(depends)) {
+                    libObj._depends = depends;
                     changed = true;
                 }
 
@@ -234,7 +267,7 @@ async function _patchPtsLibraryInternal(uuid: string, data: AssetInfo, meta: IAs
 /**
  * Cache for .pts asset types by UUID or file path
  */
-const _ptsTypeCache = new Map<string, { type: string, extends: string[] }>();
+const _ptsTypeCache = new Map<string, { type: string, extends: string[], depends: string[] }>();
 
 function _resolvePath(p: string): string {
     if (!p) return '';
@@ -245,7 +278,7 @@ function _resolvePath(p: string): string {
     return p;
 }
 
-export function getPtsTypeInfo(filePathOrUuid: string): { type: string, extends: string[] } | null {
+export function getPtsTypeInfo(filePathOrUuid: string): { type: string, extends: string[], depends: string[] } | null {
     if (!filePathOrUuid) return null;
     if (_ptsTypeCache.has(filePathOrUuid)) {
         return _ptsTypeCache.get(filePathOrUuid)!;
@@ -264,29 +297,43 @@ export function getPtsTypeInfo(filePathOrUuid: string): { type: string, extends:
         }
 
         let targetType: string | null = null;
+        let depends: string[] = [];
 
         // Try reading meta first
         if (metaPath && fs.existsSync(metaPath)) {
-            const raw = fs.readFileSync(metaPath, 'utf8');
-            const meta = JSON.parse(raw);
-            if (meta?.userData?.__type__) {
-                targetType = meta.userData.__type__;
-            }
+            try {
+                const raw = fs.readFileSync(metaPath, 'utf8');
+                const meta = JSON.parse(raw);
+                if (meta?.userData?.__type__) {
+                    targetType = meta.userData.__type__;
+                }
+                if (Array.isArray(meta?.userData?.__depends__)) {
+                    depends = meta.userData.__depends__;
+                } else if (Array.isArray(meta?.userData?.depends)) {
+                    depends = meta.userData.depends;
+                }
+            } catch {}
         }
 
         // If not in meta, try reading the .pts source file directly
-        if (!targetType && ptsPath && fs.existsSync(ptsPath)) {
-            const raw = fs.readFileSync(ptsPath, 'utf8');
-            const ptsContent = JSON.parse(raw);
-            if (ptsContent?.__type__) {
-                targetType = ptsContent.__type__;
-            }
+        if (ptsPath && fs.existsSync(ptsPath)) {
+            try {
+                const raw = fs.readFileSync(ptsPath, 'utf8');
+                const ptsContent = JSON.parse(raw);
+                if (!targetType && ptsContent?.__type__) {
+                    targetType = ptsContent.__type__;
+                }
+                if (depends.length === 0) {
+                    depends = extractAssetDependencies(ptsContent);
+                }
+            } catch {}
         }
 
         if (targetType) {
             const typeInfo = {
                 type: targetType,
-                extends: ['cc.Asset', 'Json_pTSAsset', targetType]
+                extends: ['cc.Asset', 'Json_pTSAsset', targetType],
+                depends
             };
             _ptsTypeCache.set(filePathOrUuid, typeInfo);
             return typeInfo;
@@ -303,9 +350,14 @@ function _enrichPtsAssetInfo(info: any) {
     if (!file || typeof file !== 'string' || !file.endsWith('.pts')) return;
 
     const typeInfo = getPtsTypeInfo(info.file || file);
+    console.log(`[pts-asset] Enriching asset info for ${file}:`, typeInfo);
     if (typeInfo) {
         info.type = typeInfo.type;
         info.extends = typeInfo.extends;
+        if (typeInfo.depends && typeInfo.depends.length > 0) {
+            const existing = Array.isArray(info.depends) ? info.depends : [];
+            info.depends = Array.from(new Set([...existing, ...typeInfo.depends]));
+        }
     }
 }
 
