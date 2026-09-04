@@ -9,7 +9,6 @@ const _$tail = '.pts';
 
 // ─── 1. Downloader: fetch .pts files as JSON ───
 const _downloadPts = (url: string, options: Record<string, any>, onComplete: ((err: Error | null, data?: any) => void)) => {
-    console.log("[pTSAsset] Downloader >>", url, options);
     options.xhrResponseType = 'pts';
     assetManager.downloader.downloadFile(url, options, options.onFileProgress, onComplete);
 };
@@ -85,7 +84,7 @@ function _resolveValue(val: any): any {
         }
 
         if (js.isChildClassOf(cls, Component) || js.isChildClassOf(cls, Node)) {
-            return pEngine.NodeUtils.findNodeOrCompViaZid(__value__);
+            return null;
         }
 
         const instance = new cls();
@@ -133,6 +132,12 @@ function _hydrate(asset: Asset, ptsJson: any): void {
         const _props = pEngine.NodeUtils.getAttr(targetClass);
 
         for (const _key in _props) {
+            const propCtor = _props[_key]?.ctor;
+            if (propCtor && (js.isChildClassOf(propCtor, Component) || js.isChildClassOf(propCtor, Node))) {
+                (asset as any)[_key] = null;
+                continue;
+            }
+
             if (!(_key in __value__)) {
                 const _default = _props[_key].default;
                 (asset as any)[_key] = typeof _default === 'function' ? _default() : _default;
@@ -163,7 +168,6 @@ if (!assetManager.pipeline[__seal_]) {
             const asset = item?.content || item;
             if (!(asset instanceof Asset)) continue;
             if ((asset as any)[__hydrated_]) continue;
-            console.log("[pTSAsset] Pipeline >>", asset.nativeUrl.includes(_$tail) ? "Native .pts" : "Embedded JSON", asset);
 
             const isPtsNative = (asset as any)._native === _$tail;
             const isPtsAsset = asset instanceof Json_pTSAsset;

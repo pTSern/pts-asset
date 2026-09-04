@@ -25,13 +25,38 @@ if (!fs.existsSync(mainJsPath)) {
 }
 
 let mainModule = null;
-if (fs.existsSync(mainJsPath)) {
-    try {
-        mainModule = require(mainJsPath);
-    } catch (err) {
-        console.error('[Bootstrap] Failed to require dist/main.js:', err);
+
+function loadMain() {
+    if (fs.existsSync(mainJsPath)) {
+        try {
+            mainModule = require(mainJsPath);
+        } catch (err) {
+            console.error('[Bootstrap] Failed to require dist/main.js:', err);
+        }
     }
 }
+
+function reloadMain() {
+    console.log('[Bootstrap] Hot-reloading dist/main.js...');
+    try {
+        if (mainModule && typeof mainModule.unload === 'function') {
+            mainModule.unload();
+        }
+    } catch (e) {}
+    try {
+        const resolved = require.resolve(mainJsPath);
+        delete require.cache[resolved];
+        loadMain();
+        if (mainModule && typeof mainModule.load === 'function') {
+            mainModule.load();
+        }
+        console.log('[Bootstrap] Hot-reload complete!');
+    } catch (err) {
+        console.error('[Bootstrap] Failed to reload dist/main.js:', err);
+    }
+}
+
+loadMain();
 
 exports.load = function() {
     if (mainModule && typeof mainModule.load === 'function') {
@@ -47,12 +72,20 @@ exports.unload = function() {
 
 exports.methods = new Proxy({}, {
     get(target, prop) {
+        if (prop === 'reload') {
+            return async function(...args) {
+                reloadMain();
+                if (mainModule && mainModule.methods && mainModule.methods.reload) {
+                    return mainModule.methods.reload(...args);
+                }
+            };
+        }
         if (mainModule && mainModule.methods && mainModule.methods[prop]) {
             return mainModule.methods[prop];
         }
         return undefined;
     },
     has(target, prop) {
-        return !!(mainModule && mainModule.methods && prop in mainModule.methods);
+        return prop === 'reload' || !!(mainModule && mainModule.methods && prop in mainModule.methods);
     }
 });

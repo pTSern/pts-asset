@@ -98,7 +98,10 @@ export const methods: { [key: string]: (...any: any) => any } = {
             // ids[0] is the UUID of the currently inspected asset
         }
     },
-    reload() {
+    async reload() {
+        console.log('[pts-asset] Reloading extension cache and hooks...');
+        _ptsTypeCache.clear();
+        _installMessageHook();
     },
     async onSelectionSelect(type: string, uuid: string) {
         console.log("onSelectionSelect >>", type, uuid);
@@ -122,6 +125,9 @@ export const methods: { [key: string]: (...any: any) => any } = {
         try {
             const data = await Editor.Message.request('asset-db', 'query-asset-info', uuid);
             if (!data) return;
+            // Invalidate cache
+            _ptsTypeCache.delete(uuid);
+            if (data.file) _ptsTypeCache.delete(data.file);
             // Only process .pts files
             if (!data.file || !data.file.endsWith('.pts')) return;
 
@@ -152,9 +158,21 @@ export const methods: { [key: string]: (...any: any) => any } = {
  * in Json._Register.ts reads _nativeAsset (the raw .pts JSON) and
  * re-prototypes the asset to the correct class.
  */
+const _patchingUuids = new Set<string>();
+
 async function _patchPtsLibrary(uuid: string, data: AssetInfo, meta: IAssetMeta) {
     if (!data || !meta) return;
     if (!meta.files || !meta.files.includes('.pts')) return;
+    if (_patchingUuids.has(uuid)) return;
+    _patchingUuids.add(uuid);
+    try {
+        await _patchPtsLibraryInternal(uuid, data, meta);
+    } finally {
+        _patchingUuids.delete(uuid);
+    }
+}
+
+async function _patchPtsLibraryInternal(uuid: string, data: AssetInfo, meta: IAssetMeta) {
 
     // Read the source .pts file to extract __type__
     let ptsContent: any = null;
@@ -214,11 +232,122 @@ async function _patchPtsLibrary(uuid: string, data: AssetInfo, meta: IAssetMeta)
 }
 
 /**
+ * Cache for .pts asset types by UUID or file path
+ */
+const _ptsTypeCache = new Map<string, { type: string, extends: string[] }>();
+
+function _resolvePath(p: string): string {
+    if (!p) return '';
+    if (p.startsWith('db://assets/')) {
+        const projectPath = (typeof Editor !== 'undefined' && Editor.Project && Editor.Project.path) ? Editor.Project.path : process.cwd();
+        return path.join(projectPath, 'assets', p.slice('db://assets/'.length));
+    }
+    return p;
+}
+
+export function getPtsTypeInfo(filePathOrUuid: string): { type: string, extends: string[] } | null {
+    if (!filePathOrUuid) return null;
+    if (_ptsTypeCache.has(filePathOrUuid)) {
+        return _ptsTypeCache.get(filePathOrUuid)!;
+    }
+
+    try {
+        const resolved = _resolvePath(filePathOrUuid);
+        let metaPath = '';
+        let ptsPath = '';
+        if (resolved.endsWith('.pts')) {
+            ptsPath = resolved;
+            metaPath = `${resolved}.meta`;
+        } else if (resolved.endsWith('.pts.meta')) {
+            metaPath = resolved;
+            ptsPath = resolved.slice(0, -5);
+        }
+
+        let targetType: string | null = null;
+
+        // Try reading meta first
+        if (metaPath && fs.existsSync(metaPath)) {
+            const raw = fs.readFileSync(metaPath, 'utf8');
+            const meta = JSON.parse(raw);
+            if (meta?.userData?.__type__) {
+                targetType = meta.userData.__type__;
+            }
+        }
+
+        // If not in meta, try reading the .pts source file directly
+        if (!targetType && ptsPath && fs.existsSync(ptsPath)) {
+            const raw = fs.readFileSync(ptsPath, 'utf8');
+            const ptsContent = JSON.parse(raw);
+            if (ptsContent?.__type__) {
+                targetType = ptsContent.__type__;
+            }
+        }
+
+        if (targetType) {
+            const typeInfo = {
+                type: targetType,
+                extends: ['cc.Asset', 'Json_pTSAsset', targetType]
+            };
+            _ptsTypeCache.set(filePathOrUuid, typeInfo);
+            return typeInfo;
+        }
+    } catch (e) {
+        // ignore parse errors
+    }
+    return null;
+}
+
+function _enrichPtsAssetInfo(info: any) {
+    if (!info) return;
+    const file = info.file || info.path;
+    if (!file || typeof file !== 'string' || !file.endsWith('.pts')) return;
+
+    const typeInfo = getPtsTypeInfo(info.file || file);
+    if (typeInfo) {
+        info.type = typeInfo.type;
+        info.extends = typeInfo.extends;
+    }
+}
+
+let _originalRequest: any = null;
+
+function _installMessageHook() {
+    if (_originalRequest) return;
+    if (typeof Editor === 'undefined' || !Editor.Message || typeof Editor.Message.request !== 'function') return;
+
+    _originalRequest = Editor.Message.request;
+    (Editor.Message as any).request = async function(pkg: any, message: any, ...args: any[]) {
+        const result = await _originalRequest.apply(Editor.Message, [pkg, message, ...args]);
+
+        if (pkg === 'asset-db') {
+            if (message === 'query-asset-info' && result) {
+                _enrichPtsAssetInfo(result);
+            } else if (message === 'query-assets' && Array.isArray(result)) {
+                for (const item of result) {
+                    _enrichPtsAssetInfo(item);
+                }
+            }
+        }
+        return result;
+    };
+    console.log('[pts-asset] Installed Editor.Message.request hook for query-asset-info and query-assets');
+}
+
+function _uninstallMessageHook() {
+    if (_originalRequest && typeof Editor !== 'undefined' && Editor.Message) {
+        (Editor.Message as any).request = _originalRequest;
+        _originalRequest = null;
+        console.log('[pts-asset] Uninstalled Editor.Message.request hook');
+    }
+}
+
+/**
  * @en Method Triggered on Extension Startup
  * @zh 扩展启动时触发的方法
  */
 export async function load() {
     checkPtsCoreDependency(false);
+    _installMessageHook();
 }
 
 /**
@@ -226,4 +355,5 @@ export async function load() {
  * @zh 卸载扩展时触发的方法
  */
 export function unload() {
+    _uninstallMessageHook();
 }
