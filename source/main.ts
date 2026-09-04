@@ -94,7 +94,7 @@ export const methods: { [key: string]: (...any: any) => any } = {
         console.log("Output Registered Asset:", _out);
     },
     "_cc:log"() {
-        Editor.Message.request('scene', 'execute-scene-script', { name: 'pts-asset', method: 'log', args: ["a", "b"] });
+        Editor.Message.request('scene', 'execute-scene-script', { name: 'pts-core', method: 'log', args: ["a", "b"] });
     },
     "selection:changed"(type: string, ids: string[]) {
         if (type === 'asset') {

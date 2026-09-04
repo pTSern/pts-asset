@@ -153,7 +153,7 @@ async function loadRegisteredClasses(panel: any) {
 
     try {
         const classes = await Editor.Message.request('scene', 'execute-scene-script', {
-            name: 'pts-asset',
+            name: 'pts-core',
             method: 'get_registered_pts_classes',
             args: []
         });

@@ -188,7 +188,7 @@ export async function getRegisteredClasses(): Promise<string[]> {
     const classes = new Set<string>(scanProjectPtsClasses());
     try {
         const sceneClasses: string[] = await Editor.Message.request('scene', 'execute-scene-script', {
-            name: 'pts-asset',
+            name: 'pts-core',
             method: 'get_registered_pts_classes',
             args: []
         });
@@ -248,7 +248,7 @@ export async function createAndInitPtsAsset(assetInfo: MenuAssetInfo | undefined
         let initialValues: Record<string, any> = {};
         try {
             const dumpOut: any = await Editor.Message.request('scene', 'execute-scene-script', {
-                name: 'pts-asset',
+                name: 'pts-core',
                 method: 'dump',
                 args: [className]
             });
