@@ -91,7 +91,7 @@ export function getPtsTypeInfo(filePathOrUuid: string): { type: string, extends:
         if (targetType) {
             const typeInfo = {
                 type: targetType,
-                extends: ['cc.Asset', 'pTSAsset', 'Json_pTSAsset', targetType],
+                extends: ['cc.Asset', 'pTSAsset', targetType],
                 depends
             };
             _ptsTypeCache.set(filePathOrUuid, typeInfo);

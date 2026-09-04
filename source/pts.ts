@@ -108,8 +108,23 @@ let _lastDump: any = null;
 
 function isNodeOrComponent(dump: any): boolean {
     if (!dump) return false;
+    if (dump.isArray) return false;
     const type = dump.type;
     if (type === 'cc.Node' || type === 'cc.Component') return true;
+    if (Array.isArray(dump.extends)) {
+        if (dump.extends.includes('cc.Component') || dump.extends.includes('cc.Node')) return true;
+    }
+    return false;
+}
+
+function isNodeOrComponentArray(dump: any): boolean {
+    if (!dump || !dump.isArray) return false;
+    const elemType = dump.elementTypeData?.type || (typeof dump.type === 'string' ? dump.type.replace(/^\[|\]$/g, '') : '');
+    if (elemType === 'cc.Node' || elemType === 'cc.Component') return true;
+    if (dump.elementTypeData && isNodeOrComponent(dump.elementTypeData)) return true;
+    if (Array.isArray(dump.elementTypeData?.extends)) {
+        if (dump.elementTypeData.extends.includes('cc.Component') || dump.elementTypeData.extends.includes('cc.Node')) return true;
+    }
     if (Array.isArray(dump.extends)) {
         if (dump.extends.includes('cc.Component') || dump.extends.includes('cc.Node')) return true;
     }
@@ -122,7 +137,38 @@ function normalizeType(type: string): string {
     if (valueTypes.includes(type)) {
         return 'cc.' + type;
     }
+    if (type === 'RealCurve' || type === 'cc.RealCurve') {
+        return 'cc.RealCurve';
+    }
+    if (type === 'Gradient' || type === 'cc.Gradient') {
+        return 'cc.Gradient';
+    }
+    if (type === 'GradientRange' || type === 'cc.GradientRange') {
+        return 'cc.GradientRange';
+    }
+    if (type === 'CurveRange' || type === 'cc.CurveRange') {
+        return 'cc.CurveRange';
+    }
     return type;
+}
+
+function isRealCurve(dump: any): boolean {
+    if (!dump) return false;
+    const type = normalizeType(dump.type);
+    if (type === 'cc.RealCurve') return true;
+    if (Array.isArray(dump.extends) && dump.extends.includes('cc.RealCurve')) return true;
+    if (dump.value && typeof dump.value === 'object' && Array.isArray(dump.value.keyFrames)) return true;
+    return false;
+}
+
+function isGradient(dump: any): boolean {
+    if (!dump) return false;
+    const type = normalizeType(dump.type);
+    if (type === 'cc.Gradient') return true;
+    if (Array.isArray(dump.extends) && dump.extends.includes('cc.Gradient')) return true;
+    if (Array.isArray(dump.alphaKeys) || Array.isArray(dump.colorKeys)) return true;
+    if (dump.value && typeof dump.value === 'object' && (Array.isArray(dump.value.alphaKeys) || Array.isArray(dump.value.colorKeys))) return true;
+    return false;
 }
 
 function isValueType(dump: any): boolean {
@@ -182,7 +228,15 @@ export function extractAssetDependencies(val: any, out: Set<string> = new Set())
 function populateDumpWithSaved(dump: any, savedVal: any) {
     if (!dump) return;
 
-    // 1. Node or Component: ALWAYS disabled, null, readonly
+    // 1. Array of Node or Component: ALWAYS disabled, empty array []
+    if (dump.isArray && isNodeOrComponentArray(dump)) {
+        dump.readonly = true;
+        dump.default = [];
+        dump.value = [];
+        return;
+    }
+
+    // 2. Single Node or Component: ALWAYS disabled, null, readonly
     if (isNodeOrComponent(dump)) {
         dump.readonly = true;
         dump.value = { uuid: "" };
@@ -190,7 +244,7 @@ function populateDumpWithSaved(dump: any, savedVal: any) {
         return;
     }
 
-    // 2. Arrays
+    // 3. Arrays
     if (dump.isArray) {
         if (Array.isArray(savedVal)) {
             dump.value = savedVal.map((itemVal: any) => {
@@ -208,6 +262,104 @@ function populateDumpWithSaved(dump: any, savedVal: any) {
     const vData = (savedVal && typeof savedVal === 'object' && '__value__' in savedVal)
         ? savedVal.__value__
         : savedVal;
+
+    // 4. RealCurve
+    if (isRealCurve(dump)) {
+        if (vData && typeof vData === 'object') {
+            let keyFrames: any[] = [];
+            if (Array.isArray(vData.keyFrames)) {
+                keyFrames = vData.keyFrames.map((kf: any) => ({
+                    time: typeof kf.time === 'number' ? kf.time : 0,
+                    value: typeof kf.value === 'number' ? kf.value : 0,
+                    inTangent: typeof kf.inTangent === 'number' ? kf.inTangent : (typeof kf.leftTangent === 'number' ? kf.leftTangent : 0),
+                    outTangent: typeof kf.outTangent === 'number' ? kf.outTangent : (typeof kf.rightTangent === 'number' ? kf.rightTangent : 0),
+                    inTangentWeight: typeof kf.inTangentWeight === 'number' ? kf.inTangentWeight : (typeof kf.leftTangentWeight === 'number' ? kf.leftTangentWeight : 1),
+                    outTangentWeight: typeof kf.outTangentWeight === 'number' ? kf.outTangentWeight : (typeof kf.rightTangentWeight === 'number' ? kf.rightTangentWeight : 1),
+                    interpMode: typeof kf.interpMode === 'number' ? kf.interpMode : (typeof kf.interpolationMode === 'number' ? kf.interpolationMode : 0),
+                    tangentWeightMode: typeof kf.tangentWeightMode === 'number' ? kf.tangentWeightMode : 0
+                }));
+            } else if (Array.isArray(vData._times) && Array.isArray(vData._values)) {
+                keyFrames = vData._times.map((t: number, i: number) => {
+                    const v = vData._values[i] || {};
+                    return {
+                        time: t,
+                        value: typeof v.value === 'number' ? v.value : 0,
+                        inTangent: typeof v.leftTangent === 'number' ? v.leftTangent : (typeof v.inTangent === 'number' ? v.inTangent : 0),
+                        outTangent: typeof v.rightTangent === 'number' ? v.rightTangent : (typeof v.outTangent === 'number' ? v.outTangent : 0),
+                        inTangentWeight: typeof v.leftTangentWeight === 'number' ? v.leftTangentWeight : (typeof v.inTangentWeight === 'number' ? v.inTangentWeight : 1),
+                        outTangentWeight: typeof v.rightTangentWeight === 'number' ? v.rightTangentWeight : (typeof v.outTangentWeight === 'number' ? v.outTangentWeight : 1),
+                        interpMode: typeof v.interpolationMode === 'number' ? v.interpolationMode : (typeof v.interpMode === 'number' ? v.interpMode : 0),
+                        tangentWeightMode: typeof v.tangentWeightMode === 'number' ? v.tangentWeightMode : 0
+                    };
+                });
+            }
+
+            dump.value = {
+                keyFrames,
+                multiplier: typeof vData.multiplier === 'number' ? vData.multiplier : 1,
+                preExtrapolation: vData.preExtrapolation ?? 1,
+                postExtrapolation: vData.postExtrapolation ?? 1
+            };
+        } else {
+            dump.value = dump.default || { keyFrames: [], multiplier: 1 };
+        }
+        return;
+    }
+
+    // 5. Gradient
+    if (isGradient(dump)) {
+        if (vData && typeof vData === 'object') {
+            let modeVal = 0;
+            if (typeof vData.mode === 'number') {
+                modeVal = vData.mode;
+            } else if (vData.value && typeof vData.value.mode === 'number') {
+                modeVal = vData.value.mode;
+            } else if (vData.value && typeof vData.value.mode?.value === 'number') {
+                modeVal = vData.value.mode.value;
+            }
+
+            const rawAlphaKeys = Array.isArray(vData.alphaKeys) 
+                ? vData.alphaKeys 
+                : (vData.value && Array.isArray(vData.value.alphaKeys) ? vData.value.alphaKeys : []);
+            const alphaKeys = rawAlphaKeys.map((ak: any) => ({
+                time: typeof ak.time === 'number' ? ak.time : 0,
+                alpha: typeof ak.alpha === 'number' ? ak.alpha : 255
+            }));
+
+            const rawColorKeys = Array.isArray(vData.colorKeys) 
+                ? vData.colorKeys 
+                : (vData.value && Array.isArray(vData.value.colorKeys) ? vData.value.colorKeys : []);
+            const colorKeys = rawColorKeys.map((ck: any) => {
+                let colorVal = ck.color;
+                if (colorVal && typeof colorVal === 'object' && !Array.isArray(colorVal)) {
+                    colorVal = [colorVal.r ?? 255, colorVal.g ?? 255, colorVal.b ?? 255];
+                } else if (!Array.isArray(colorVal)) {
+                    colorVal = [255, 255, 255];
+                }
+                return {
+                    time: typeof ck.time === 'number' ? ck.time : 0,
+                    color: colorVal
+                };
+            });
+
+            dump.type = 'cc.Gradient';
+            if (dump.value && typeof dump.value === 'object' && dump.value.mode && typeof dump.value.mode === 'object' && 'value' in dump.value.mode) {
+                dump.value.mode.value = modeVal;
+            } else {
+                dump.value = { mode: { name: 'mode', value: modeVal, default: 0, type: 'Number', readonly: false, visible: true, animatable: true, extends: [] } };
+            }
+            dump.alphaKeys = alphaKeys;
+            dump.colorKeys = colorKeys;
+            dump.value.alphaKeys = alphaKeys;
+            dump.value.colorKeys = colorKeys;
+        } else {
+            dump.type = 'cc.Gradient';
+            dump.value = dump.default || { mode: 0 };
+            dump.alphaKeys = dump.alphaKeys || [];
+            dump.colorKeys = dump.colorKeys || [];
+        }
+        return;
+    }
 
     // 3. Nested @ccclass struct (e.g. Test___Helper)
     if (isNestedDump(dump.value)) {
@@ -282,13 +434,86 @@ function populateDumpWithSaved(dump: any, savedVal: any) {
 export function extractDumpValue(dump: any): any {
     if (!dump) return null;
 
+    if (dump.isArray) {
+        if (isNodeOrComponentArray(dump)) {
+            return [];
+        }
+        if (!Array.isArray(dump.value)) return [];
+        return dump.value.map((item: any) => extractDumpValue(item));
+    }
+
     if (isNodeOrComponent(dump)) {
         return null;
     }
 
-    if (dump.isArray) {
-        if (!Array.isArray(dump.value)) return [];
-        return dump.value.map((item: any) => extractDumpValue(item));
+    if (isRealCurve(dump)) {
+        const val = dump.value || {};
+        const rawKeyFrames = Array.isArray(val.keyFrames) ? val.keyFrames : [];
+        const keyFrames = rawKeyFrames.map((kf: any) => ({
+            time: typeof kf.time === 'number' ? kf.time : 0,
+            value: typeof kf.value === 'number' ? kf.value : 0,
+            inTangent: typeof kf.inTangent === 'number' ? kf.inTangent : (typeof kf.leftTangent === 'number' ? kf.leftTangent : 0),
+            outTangent: typeof kf.outTangent === 'number' ? kf.outTangent : (typeof kf.rightTangent === 'number' ? kf.rightTangent : 0),
+            inTangentWeight: typeof kf.inTangentWeight === 'number' ? kf.inTangentWeight : (typeof kf.leftTangentWeight === 'number' ? kf.leftTangentWeight : 1),
+            outTangentWeight: typeof kf.outTangentWeight === 'number' ? kf.outTangentWeight : (typeof kf.rightTangentWeight === 'number' ? kf.rightTangentWeight : 1),
+            interpMode: typeof kf.interpMode === 'number' ? kf.interpMode : (typeof kf.interpolationMode === 'number' ? kf.interpolationMode : 0),
+            tangentWeightMode: typeof kf.tangentWeightMode === 'number' ? kf.tangentWeightMode : 0
+        }));
+
+        return {
+            __type__: 'cc.RealCurve',
+            __value__: {
+                preExtrapolation: typeof val.preExtrapolation === 'number' ? val.preExtrapolation : 1,
+                postExtrapolation: typeof val.postExtrapolation === 'number' ? val.postExtrapolation : 1,
+                keyFrames
+            }
+        };
+    }
+
+    if (isGradient(dump)) {
+        let mode = 0;
+        if (dump.value && typeof dump.value === 'object') {
+            if (typeof dump.value.mode === 'number') {
+                mode = dump.value.mode;
+            } else if (dump.value.mode && typeof dump.value.mode.value === 'number') {
+                mode = dump.value.mode.value;
+            }
+        } else if (typeof dump.mode === 'number') {
+            mode = dump.mode;
+        }
+
+        const rawAlphaKeys = Array.isArray(dump.alphaKeys) 
+            ? dump.alphaKeys 
+            : (dump.value && Array.isArray(dump.value.alphaKeys) ? dump.value.alphaKeys : []);
+        const cleanAlphaKeys = rawAlphaKeys.map((ak: any) => ({
+            time: typeof ak.time === 'number' ? ak.time : 0,
+            alpha: typeof ak.alpha === 'number' ? ak.alpha : 255
+        }));
+
+        const rawColorKeys = Array.isArray(dump.colorKeys) 
+            ? dump.colorKeys 
+            : (dump.value && Array.isArray(dump.value.colorKeys) ? dump.value.colorKeys : []);
+        const cleanColorKeys = rawColorKeys.map((ck: any) => {
+            let colorVal = ck.color;
+            if (colorVal && typeof colorVal === 'object' && !Array.isArray(colorVal)) {
+                colorVal = [colorVal.r ?? 255, colorVal.g ?? 255, colorVal.b ?? 255];
+            } else if (!Array.isArray(colorVal)) {
+                colorVal = [255, 255, 255];
+            }
+            return {
+                time: typeof ck.time === 'number' ? ck.time : 0,
+                color: colorVal
+            };
+        });
+
+        return {
+            __type__: 'cc.Gradient',
+            __value__: {
+                mode,
+                alphaKeys: cleanAlphaKeys,
+                colorKeys: cleanColorKeys
+            }
+        };
     }
 
     if (isNestedDump(dump.value)) {
@@ -368,12 +593,13 @@ async function renderView(this: PanelThis, dumpValue: any) {
     this.$.view.innerHTML = _keys.reduce((_prev, _cur) => {
         const _item = dumpValue[_cur] as _TData;
         if (_item.isArray) {
+            const isNodeComp = isNodeOrComponentArray(_item);
             _prev += `
                 <ui-section expand class="pts-array" data-key="${_cur}">
                     <ui-label slot="header">${_format(_cur)} [${_item.value.length}]</ui-label>
                     <ui-prop>
                         <ui-label slot="label">Size</ui-label>
-                        <ui-num-input class="pts-array-size" slot="content" value="${_item.value.length}" data-key="${_cur}" step="1" min="0"></ui-num-input>
+                        <ui-num-input class="pts-array-size" slot="content" value="${_item.value.length}" data-key="${_cur}" step="1" min="0" ${isNodeComp ? 'disabled' : ''}></ui-num-input>
                     </ui-prop>
                     <div class="pts-array-elements">
                         ${_item.value.map((_: any, i: number) => `<ui-prop type="dump" class="pts-array-item" data-key="${_cur}" data-index="${i}"></ui-prop>`).join('')}
@@ -485,6 +711,12 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
 
         // Collect values from array items
         const arrayValues: Record<string, any[]> = {};
+        this.$.view.querySelectorAll('.pts-array').forEach((el: any) => {
+            const key = el.dataset.key;
+            if (key) {
+                arrayValues[key] = [];
+            }
+        });
         this.$.view.querySelectorAll('.pts-array-item').forEach((el: any) => {
             const key = el.dataset.key;
             const index = parseInt(el.dataset.index);
