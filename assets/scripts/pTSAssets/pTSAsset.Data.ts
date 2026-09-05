@@ -9,7 +9,7 @@ interface _<_TType, _TOut> {
 }
 
 @ccclass('pTSAsset_Data')
-export abstract class pTSAsset_Data<_TType, _TOut = _TType> extends pTSAsset<_<_TType, _TOut>> {
+export abstract class pTSAsset_Data<_TType = any, _TOut = _TType> extends pTSAsset<_<_TType, _TOut>> {
     abstract data: _TType;
 
     get() {
@@ -19,6 +19,7 @@ export abstract class pTSAsset_Data<_TType, _TOut = _TType> extends pTSAsset<_<_
     set(value: _TType) {
         if(this.data === value) return;
         this.emit('onChanged', value, this._clone(this.data));
+        console.log(`pTSAsset_Data_[${this.name}]: set >>> `, value);
         this.data = value;
     }
 
