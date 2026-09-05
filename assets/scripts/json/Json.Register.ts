@@ -1,6 +1,7 @@
 import { Asset, assetManager, Component, Node, js, director, Director, assert, RealCurve, Gradient, ColorKey, AlphaKey, Color } from "cc";
 import { pTSAsset } from "db://pts-core/scripts/pTSAsset";
 import { pEngine } from "db://pts-core/scripts/utils";
+import { loadLazyBundle, isLazyReady, lazyAssetsCache, shouldLoadLazy } from "../_$secret/_lazy-migration";
 
 const __seal_ = Symbol('__sealed_');
 const __hydrated_ = Symbol('__hydrated_');
@@ -37,7 +38,7 @@ function _creator(id: string, data: any, opt: Record<string, any>, onComplete: (
     try {
         const _out = new pTSAsset();
         _out._nativeAsset = data;
-        _hydrate(_out, data);
+        _hydrate(_out as any, data);
         onComplete(null, _out);
     } catch (e) {
         onComplete(e as Error, null);
@@ -63,10 +64,169 @@ const _pendingAssetRefs: PendingAssetRef[] = [];
 const _inFlightAssetLoads = new Map<string, Promise<Asset | null>>();
 const _visitingUuids = new Set<string>();
 
+// ─── 4.1 In-Flight Bundle Loading Tracker ───
+const _inFlightBundles = new Map<string, Promise<any>>();
+
+function _notifyBundleLoaded(bundle: any) {
+    if (_pendingAssetRefs.length > 0) {
+        for (let i = _pendingAssetRefs.length - 1; i >= 0; i--) {
+            const ref = _pendingAssetRefs[i];
+            let asset = _findAssetByUuid(ref.uuid);
+            if (asset) {
+                ref.target[ref.propKey] = asset;
+                _pendingAssetRefs.splice(i, 1);
+                continue;
+            }
+
+            const decoded = (assetManager as any)?.utils?.decodeUuid ? (assetManager as any).utils.decodeUuid(ref.uuid) : null;
+            const compressed = (assetManager as any)?.utils?.compressUuid ? (assetManager as any).utils.compressUuid(ref.uuid) : null;
+            const hasAsset = typeof bundle.getAssetInfo === 'function' && (
+                bundle.getAssetInfo(ref.uuid) ||
+                (decoded && bundle.getAssetInfo(decoded)) ||
+                (compressed && bundle.getAssetInfo(compressed))
+            );
+
+            if (hasAsset) {
+                const targetRef = ref;
+                _pendingAssetRefs.splice(i, 1);
+                _loadAssetByUuid(targetRef.uuid, targetRef.target, targetRef.propKey);
+            }
+        }
+    }
+}
+
+// Intercept assetManager.loadBundle to track bundles currently in the loading process
+if (typeof assetManager !== 'undefined' && typeof assetManager.loadBundle === 'function') {
+    const _origLoadBundle = assetManager.loadBundle.bind(assetManager);
+    (assetManager as any).loadBundle = function (name: string, ...args: any[]) {
+        let onComplete: any = null;
+        let callbackIndex = -1;
+
+        for (let i = args.length - 1; i >= 0; i--) {
+            if (typeof args[i] === 'function') {
+                onComplete = args[i];
+                callbackIndex = i;
+                break;
+            }
+        }
+
+        let resolvePromise: (b: any) => void;
+        const bundlePromise = new Promise<any>((resolve) => {
+            resolvePromise = resolve;
+        });
+
+        _inFlightBundles.set(name, bundlePromise);
+
+        const wrappedCallback = (err: any, bundle: any) => {
+            _inFlightBundles.delete(name);
+            resolvePromise(bundle);
+            if (bundle) {
+                _notifyBundleLoaded(bundle);
+            }
+            if (onComplete) {
+                onComplete(err, bundle);
+            }
+        };
+
+        if (callbackIndex >= 0) {
+            args[callbackIndex] = wrappedCallback;
+        } else {
+            args.push(wrappedCallback);
+        }
+
+        return _origLoadBundle(name, ...args);
+    };
+}
+
+function _isUuidInAnyLoadedBundle(uuid: string): boolean {
+    if (!assetManager.bundles) return false;
+    let found = false;
+    const decoded = (assetManager as any)?.utils?.decodeUuid ? (assetManager as any).utils.decodeUuid(uuid) : null;
+    const compressed = (assetManager as any)?.utils?.compressUuid ? (assetManager as any).utils.compressUuid(uuid) : null;
+
+    try {
+        if (typeof (assetManager.bundles as any).forEach === 'function') {
+            (assetManager.bundles as any).forEach((bundle: any) => {
+                if (!found && bundle && typeof bundle.getAssetInfo === 'function') {
+                    if (bundle.getAssetInfo(uuid) ||
+                        (decoded && bundle.getAssetInfo(decoded)) ||
+                        (compressed && bundle.getAssetInfo(compressed))) {
+                        found = true;
+                    }
+                }
+            });
+        }
+    } catch {}
+    return found;
+}
+
+function _findAssetInBundles(uuid: string): Asset | null {
+    if (!assetManager.bundles) return null;
+    let found: Asset | null = null;
+    const decoded = (assetManager as any)?.utils?.decodeUuid ? (assetManager as any).utils.decodeUuid(uuid) : null;
+    const compressed = (assetManager as any)?.utils?.compressUuid ? (assetManager as any).utils.compressUuid(uuid) : null;
+
+    try {
+        if (typeof (assetManager.bundles as any).forEach === 'function') {
+            (assetManager.bundles as any).forEach((bundle: any) => {
+                if (!found && bundle) {
+                    if (typeof bundle.getAssetInfo === 'function') {
+                        const info = bundle.getAssetInfo(uuid) || (decoded && bundle.getAssetInfo(decoded)) || (compressed && bundle.getAssetInfo(compressed));
+                        if (info && assetManager.assets) {
+                            const a = assetManager.assets.get(info.uuid) || assetManager.assets.get(uuid);
+                            if (a) found = a;
+                        }
+                    }
+                }
+            });
+        }
+    } catch {}
+    return found;
+}
+
+function _findAssetByUuid(uuid: string): Asset | null {
+    if (!uuid) return null;
+    try {
+        // 1. Check pre-indexed lazy assets cache
+        let asset = lazyAssetsCache.get(uuid);
+        if (asset) return asset;
+
+        // 2. Check assetManager.assets
+        if (assetManager.assets) {
+            asset = assetManager.assets.get(uuid);
+            if (asset) return asset;
+
+            const utils = (assetManager as any)?.utils;
+            if (utils?.decodeUuid) {
+                const decoded = utils.decodeUuid(uuid);
+                if (decoded && decoded !== uuid) {
+                    asset = assetManager.assets.get(decoded) || lazyAssetsCache.get(decoded);
+                    if (asset) return asset;
+                }
+            }
+            if (utils?.compressUuid) {
+                const compressed = utils.compressUuid(uuid);
+                if (compressed && compressed !== uuid) {
+                    asset = assetManager.assets.get(compressed) || lazyAssetsCache.get(compressed);
+                    if (asset) return asset;
+                }
+            }
+        }
+
+        // 3. Check loaded bundles
+        if (!asset) {
+            asset = _findAssetInBundles(uuid);
+        }
+        return asset || null;
+    } catch {
+        return null;
+    }
+}
+
 function _loadAssetByUuid(uuid: string, target?: any, propKey?: string): Promise<Asset | null> {
     if (!uuid) return Promise.resolve(null);
 
-    const existing = _findAssetByUuid(uuid);
+    let existing = _findAssetByUuid(uuid);
     if (existing) {
         if (target && propKey) {
             target[propKey] = existing;
@@ -91,36 +251,94 @@ function _loadAssetByUuid(uuid: string, target?: any, propKey?: string): Promise
         return Promise.resolve(null);
     }
 
-    const loadPromise = new Promise<Asset | null>((resolve) => {
-        if (typeof assetManager === 'undefined' || typeof assetManager.loadAny !== 'function') {
-            console.warn(`[pTSAsset] assetManager.loadAny not available to load dependency ${uuid}`);
-            resolve(null);
-            return;
+    const loadPromise = (async (): Promise<Asset | null> => {
+        // 1. If lazy bundle is still loading in Preview/Build, await it first
+        if (shouldLoadLazy() && !isLazyReady()) {
+            await loadLazyBundle();
+            existing = _findAssetByUuid(uuid);
+            if (existing) {
+                if (target && propKey) {
+                    target[propKey] = existing;
+                }
+                const childDeps = (existing as any).__pending_deps_promise__;
+                if (childDeps) {
+                    await childDeps.catch(() => {});
+                }
+                return existing;
+            }
         }
 
-        _visitingUuids.add(uuid);
+        // 2. If ANY bundles are currently in the process of loading (e.g. 'game' bundle), await them!
+        let waitCycles = 0;
+        while (_inFlightBundles.size > 0 && waitCycles < 5) {
+            waitCycles++;
+            await Promise.all(Array.from(_inFlightBundles.values())).catch(() => {});
+            existing = _findAssetByUuid(uuid);
+            if (existing) {
+                if (target && propKey) {
+                    target[propKey] = existing;
+                }
+                const childDeps = (existing as any).__pending_deps_promise__;
+                if (childDeps) {
+                    await childDeps.catch(() => {});
+                }
+                return existing;
+            }
+        }
 
-        assetManager.loadAny({ uuid }, (err: any, loadedAsset: any) => {
-            _visitingUuids.delete(uuid);
+        // 3. Sub-assets (e.g. SpriteFrames or Textures with '@') NEVER have standalone files on disk in Cocos builds.
+        // If they are not found in memory or _lazy bundle, NEVER call assetManager.loadAny — doing so triggers a 404!
+        if (uuid.includes('@')) {
+            console.warn(`[pTSAsset] Sub-asset "${uuid}" not found in loaded assets or bundles.`);
+            return null;
+        }
 
-            if (err) {
-                console.error(`[pTSAsset] Failed to load dependency asset (uuid: ${uuid}):`, err);
+        // 4. Standalone assets: Check if any currently loaded bundle knows about this UUID.
+        // In Cocos Creator builds, assets in bundles only exist within their bundle's path.
+        // If no currently loaded bundle knows about this UUID, calling loadAny({ uuid })
+        // will cause Cocos to request /<uuid>.json which 404s!
+        const canLoadDirectly = _isUuidInAnyLoadedBundle(uuid);
+        if (!canLoadDirectly) {
+            // Register as pending asset reference so when its bundle loads later, it gets populated
+            if (target && propKey) {
+                _pendingAssetRefs.push({ target, propKey, uuid });
+            }
+            console.warn(`[pTSAsset] Dependency asset "${uuid}" belongs to a bundle that is not loaded yet. Deferred until bundle loads.`);
+            return null;
+        }
+
+        // 5. If a loaded bundle knows this UUID, call assetManager.loadAny
+        return new Promise<Asset | null>((resolve) => {
+            if (typeof assetManager === 'undefined' || typeof assetManager.loadAny !== 'function') {
+                console.warn(`[pTSAsset] assetManager.loadAny not available to load dependency ${uuid}`);
                 resolve(null);
                 return;
             }
 
-            if (target && propKey && loadedAsset) {
-                target[propKey] = loadedAsset;
-            }
+            _visitingUuids.add(uuid);
 
-            const childDeps = loadedAsset && (loadedAsset as any).__pending_deps_promise__;
-            if (childDeps) {
-                childDeps.then(() => resolve(loadedAsset)).catch(() => resolve(loadedAsset));
-            } else {
-                resolve(loadedAsset || null);
-            }
+            assetManager.loadAny({ uuid }, (err: any, loadedAsset: any) => {
+                _visitingUuids.delete(uuid);
+
+                if (err) {
+                    console.error(`[pTSAsset] Failed to load dependency asset (uuid: ${uuid}):`, err);
+                    resolve(null);
+                    return;
+                }
+
+                if (target && propKey && loadedAsset) {
+                    target[propKey] = loadedAsset;
+                }
+
+                const childDeps = loadedAsset && (loadedAsset as any).__pending_deps_promise__;
+                if (childDeps) {
+                    childDeps.then(() => resolve(loadedAsset)).catch(() => resolve(loadedAsset));
+                } else {
+                    resolve(loadedAsset || null);
+                }
+            });
         });
-    });
+    })();
 
     _inFlightAssetLoads.set(uuid, loadPromise);
 
@@ -135,35 +353,6 @@ function _registerPendingAssetRef(target: any, propKey: string, uuid: string): P
     if (!target || !propKey || !uuid) return Promise.resolve(null);
     _pendingAssetRefs.push({ target, propKey, uuid });
     return _loadAssetByUuid(uuid, target, propKey);
-}
-
-function _findAssetInBundles(uuid: string): Asset | null {
-    if (!assetManager.bundles) return null;
-    let found: Asset | null = null;
-    try {
-        if (typeof (assetManager.bundles as any).forEach === 'function') {
-            (assetManager.bundles as any).forEach((bundle: any) => {
-                if (!found && bundle && typeof bundle.get === 'function') {
-                    const a = bundle.get(uuid);
-                    if (a) found = a;
-                }
-            });
-        }
-    } catch {}
-    return found;
-}
-
-function _findAssetByUuid(uuid: string): Asset | null {
-    if (!uuid) return null;
-    try {
-        let asset = assetManager.assets ? assetManager.assets.get(uuid) : null;
-        if (!asset) {
-            asset = _findAssetInBundles(uuid);
-        }
-        return asset || null;
-    } catch {
-        return null;
-    }
 }
 
 function _setupAssetLazyGetter(target: any, propKey: string, uuid: string) {
@@ -358,6 +547,26 @@ function _resolveValue(val: any, expectedCtor?: any, target?: any, propKey?: str
 
     const { __value__, __type__ } = val;
 
+    // Direct asset reference check: { __uuid__: "..." } or { uuid: "..." }
+    const directUuid = (typeof val.__uuid__ === 'string')
+        ? val.__uuid__
+        : ((typeof val.uuid === 'string' && val.uuid.includes('-')) ? val.uuid : null);
+
+    if (directUuid) {
+        const loaded = _findAssetByUuid(directUuid);
+
+        if (target && propKey) {
+            _setupAssetLazyGetter(target, propKey, directUuid);
+        }
+
+        const p = _loadAssetByUuid(directUuid, target, propKey);
+        if (depsOut) {
+            depsOut.push(p);
+        }
+
+        return loaded || null;
+    }
+
     if (__type__) {
         // Asset references: { __type__, __value__: { uuid: "..." } } or { __type__, __value__: "uuid" }
         const uuid = (__value__ && typeof __value__ === 'object' && typeof __value__.uuid === 'string')
@@ -494,8 +703,8 @@ function _hydrate(asset: Asset, ptsJson: any): void {
                         || Array.isArray((asset as any)[_key])
                         || Array.isArray(propDef?.type)
                         || Array.isArray(propDef?.ctor)
-                        || propDef?.type === Array
-                        || propDef?.ctor === Array
+                        || propDef?.type === (Array as any)
+                        || propDef?.ctor === (Array as any)
                         || Array.isArray(propDef?.default)
                         || (typeof propDef?.default === 'function' && Array.isArray(propDef.default()));
 
@@ -589,7 +798,7 @@ if (!assetManager.pipeline[__seal_]) {
                 if ((_is_pTSNative || _is_pTSAsset || _has_pTSData) && !(_asset as any)[__hydrated_]) {
                     const _pTSData = (_asset as any)._nativeAsset || (_asset as any).json;
                     if (_pTSData) {
-                        _hydrate(_asset, _pTSData);
+                        _hydrate(_asset as any, _pTSData);
                     }
                 }
 

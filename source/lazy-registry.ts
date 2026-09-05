@@ -242,6 +242,13 @@ export function rescanAndSyncLazyPrefab(): LazySyncReport {
                 } else if (Array.isArray(meta?.userData?.depends)) {
                     depends = meta.userData.depends;
                 }
+
+                // Ensure meta.files includes both '.json' and '.pts' so Cocos build pipeline emits import json
+                if (Array.isArray(meta.files) && !meta.files.includes('.json')) {
+                    meta.files.unshift('.json');
+                    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf8');
+                    console.log(`[pts-asset:lazy-registry] Auto-healed missing '.json' in meta.files for ${ptsFile}`);
+                }
             } catch {}
         }
 
