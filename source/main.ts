@@ -3,8 +3,7 @@ import pkg from '../package.json'
 import path from 'path'
 
 import { AssetInfo, IAssetMeta } from '@cocos/creator-types/editor/packages/asset-db/@types/public'
-
-
+import { getExtendsChain, setRuntimeInheritanceChains, clearInheritanceCache } from './inheritance'
 
 function openUrl(url: string) {
     try {
@@ -342,7 +341,7 @@ export function getPtsTypeInfo(filePathOrUuid: string): { type: string, extends:
         if (targetType) {
             const typeInfo = {
                 type: targetType,
-                extends: ['cc.Asset', 'pTSAsset', targetType],
+                extends: getExtendsChain(targetType),
                 depends
             };
             _ptsTypeCache.set(filePathOrUuid, typeInfo);
@@ -410,6 +409,19 @@ function _uninstallMessageHook() {
 export async function load() {
     checkPtsCoreDependency(false);
     _installMessageHook();
+
+    try {
+        Editor.Message.request('scene', 'execute-scene-script', {
+            name: 'pts-core',
+            method: 'get_all_pts_inheritance_chains',
+            args: []
+        }).then((chains: any) => {
+            if (chains && typeof chains === 'object') {
+                setRuntimeInheritanceChains(chains);
+                _ptsTypeCache.clear();
+            }
+        }).catch(() => {});
+    } catch {}
 }
 
 /**
@@ -418,4 +430,6 @@ export async function load() {
  */
 export function unload() {
     _uninstallMessageHook();
+    _ptsTypeCache.clear();
+    clearInheritanceCache();
 }

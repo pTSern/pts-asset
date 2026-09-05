@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { getExtendsChain, clearInheritanceCache } from './inheritance';
 
 declare const Manager: any;
 declare const Editor: any;
@@ -91,7 +92,7 @@ export function getPtsTypeInfo(filePathOrUuid: string): { type: string, extends:
         if (targetType) {
             const typeInfo = {
                 type: targetType,
-                extends: ['cc.Asset', 'pTSAsset', targetType],
+                extends: getExtendsChain(targetType),
                 depends
             };
             _ptsTypeCache.set(filePathOrUuid, typeInfo);
@@ -159,6 +160,7 @@ export function load() {
 export function unload() {
     console.log('[pts-asset:asset-db] Unloaded asset-db worker hooks');
     _ptsTypeCache.clear();
+    clearInheritanceCache();
     _installed = false;
 }
 
@@ -169,6 +171,7 @@ export const methods = {
         } else {
             _ptsTypeCache.clear();
         }
+        clearInheritanceCache();
         return true;
     },
     getTypeInfo(filePath: string) {
