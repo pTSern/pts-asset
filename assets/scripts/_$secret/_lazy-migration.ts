@@ -1,44 +1,150 @@
-
-/**
- * UI 的渲染在 v3.0 变为使用 node.layer 来判断可见性，为了保证老版本项目升级后表现一致，
- * Creator 会在运行时动态分配一个未使用的 layer 给常驻节点的 UI，避免常驻节点的 UI 与场景中
- * 的其他 UI 的 layer 发生冲突，当你确定不会发生冲突时，你可以移除此脚本.
- *
- * UI rendering has changed in v3.0 to use node.layer to determine visibility.
- * To ensure consistent performance after upgrading old projects.
- * Creator will dynamically assign an unused layer to the UI node in the persist node at
- * runtime to avoid conflicts between the layer of UI in the persist node and the
- * layer of other UI in the scene. You can remove this script when you
- * are sure there is no conflict
- */
-
-import { _decorator, Node, director, Director, game, BaseNode, Canvas, Camera, assetManager, Prefab, instantiate } from 'cc';
+import { _decorator, director, Director, assetManager, Prefab, instantiate, Asset, Node } from 'cc';
 import { BUILD } from 'cc/env';
 import { pConst } from 'db://pts-core/scripts/utils';
 
-director.once(Director.EVENT_BEFORE_SCENE_LAUNCH, () => {
-    const _is = pConst.EDITOR_ONLY_IN_PREVIEW || BUILD
-    console.log("[Lazy Migration] Loading '_lazy' prefab from bundle '_$secret'...", _is);
-    if(_is) {
-        //setTimeout( () => {
+export const lazyAssetsCache = new Map<string, Asset>();
 
+let _lazyPromise: Promise<Prefab | null> | null = null;
+let _lazyPrefab: Prefab | null = null;
+let _isPersistNodeAdded = false;
+
+export function shouldLoadLazy(): boolean {
+    return !!(pConst.EDITOR_ONLY_IN_PREVIEW || BUILD);
+}
+
+export function isLazyReady(): boolean {
+    return !!_lazyPrefab;
+}
+
+export function getLazyPrefab(): Prefab | null {
+    return _lazyPrefab;
+}
+
+export function registerLazyAsset(asset: Asset): void {
+    if (!asset) return;
+    const rawUuid = (asset as any)._uuid || (asset as any).uuid;
+    if (rawUuid) {
+        lazyAssetsCache.set(rawUuid, asset);
+    }
+    try {
+        const utils = (assetManager as any)?.utils;
+        if (utils && rawUuid) {
+            if (typeof utils.decodeUuid === 'function') {
+                const decoded = utils.decodeUuid(rawUuid);
+                if (decoded && decoded !== rawUuid) {
+                    lazyAssetsCache.set(decoded, asset);
+                }
+            }
+            if (typeof utils.compressUuid === 'function') {
+                const compressed = utils.compressUuid(rawUuid);
+                if (compressed && compressed !== rawUuid) {
+                    lazyAssetsCache.set(compressed, asset);
+                }
+            }
+        }
+    } catch {}
+}
+
+function _doAttach(prefab: Prefab, scene: any): void {
+    if (_isPersistNodeAdded) return;
+    if (!scene || typeof scene.getChildByName !== 'function') return;
+
+    if (scene.getChildByName('_lazy')) {
+        _isPersistNodeAdded = true;
+        return;
+    }
+
+    try {
+        const node = instantiate(prefab);
+        scene.addChild(node);
+        director.addPersistRootNode(node);
+        _isPersistNodeAdded = true;
+        console.log('[Lazy Migration] Successfully added "_lazy" prefab to scene and made persistent.');
+    } catch (e) {
+        console.error('[Lazy Migration] Failed to attach persist node:', e);
+    }
+}
+
+function _attachPersistNode(prefab: Prefab): void {
+    if (_isPersistNodeAdded) return;
+    const scene = director.getScene();
+    if (scene) {
+        _doAttach(prefab, scene);
+    } else {
+        director.once(Director.EVENT_AFTER_SCENE_LAUNCH, () => {
+            const sc = director.getScene();
+            if (sc) {
+                _doAttach(prefab, sc);
+            }
+        });
+    }
+}
+
+export function loadLazyBundle(): Promise<Prefab | null> {
+    if (!shouldLoadLazy()) {
+        return Promise.resolve(null);
+    }
+
+    if (_lazyPromise) {
+        return _lazyPromise;
+    }
+
+    _lazyPromise = new Promise<Prefab | null>((resolve) => {
+        if (typeof assetManager === 'undefined' || typeof assetManager.loadBundle !== 'function') {
+            console.warn('[Lazy Migration] assetManager.loadBundle not available');
+            resolve(null);
+            return;
+        }
+
+        console.log("[Lazy Migration] Loading bundle '_$secret'...");
         assetManager.loadBundle('_$secret', (err, bundle) => {
             if (err) {
                 console.error('[Lazy Migration] Failed to load bundle "_$secret":', err);
+                resolve(null);
                 return;
             }
+
             bundle.load('_lazy', Prefab, (err, prefab) => {
                 if (err || !prefab) {
                     console.error('[Lazy Migration] Failed to load prefab "_lazy":', err);
+                    resolve(null);
                     return;
                 }
-                console.log('[Lazy Migration] Successfully added "_lazy" prefab to the scene and made it persistent.');
-                const _node = instantiate(prefab);
-                director.getScene().addChild(_node);
-                director.addPersistRootNode(_node);
-            })
-        })
-        //}, 5000 )
+
+                _lazyPrefab = prefab;
+
+                // Pre-index all assets referenced in pTSAsset_Register component
+                try {
+                    const rootNode = (prefab as any).data as Node;
+                    if (rootNode) {
+                        const regComp = rootNode.getComponent('pTSAsset_Register') as any;
+                        if (regComp && Array.isArray(regComp.assets)) {
+                            for (const a of regComp.assets) {
+                                if (a) registerLazyAsset(a);
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.warn('[Lazy Migration] Error indexing assets from _lazy prefab:', e);
+                }
+
+                console.log(`[Lazy Migration] Successfully loaded "_lazy" prefab with ${lazyAssetsCache.size} indexed assets.`);
+                _attachPersistNode(prefab);
+                resolve(prefab);
+            });
+        });
+    });
+
+    return _lazyPromise;
+}
+
+// Auto-start loading in Preview or Build mode immediately
+if (shouldLoadLazy()) {
+    loadLazyBundle();
+}
+
+director.once(Director.EVENT_BEFORE_SCENE_LAUNCH, () => {
+    if (shouldLoadLazy()) {
+        loadLazyBundle();
     }
 });
-

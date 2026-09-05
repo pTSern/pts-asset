@@ -232,13 +232,21 @@ async function _patchPtsLibraryInternal(uuid: string, data: any, meta: any) {
 
     const depends = extractAssetDependencies(ptsContent);
 
-    // Store __type__ and __depends__ in meta.userData for reference
-    const needMetaUpdate = meta.userData?.__type__ !== ptsContent.__type__ || JSON.stringify(meta.userData?.__depends__) !== JSON.stringify(depends) || 'depends' in (meta.userData || {});
+    // Store __type__ and __depends__ in meta.userData for reference, and ensure meta.files has ['.json', '.pts']
+    const hasJsonInFiles = Array.isArray(meta.files) && meta.files.includes('.json');
+    const needMetaUpdate = meta.userData?.__type__ !== ptsContent.__type__ || 
+        JSON.stringify(meta.userData?.__depends__) !== JSON.stringify(depends) || 
+        'depends' in (meta.userData || {}) ||
+        !hasJsonInFiles;
+
     if (needMetaUpdate) {
         meta.userData = meta.userData || {};
         meta.userData.__type__ = ptsContent.__type__;
         meta.userData.__depends__ = depends;
         delete meta.userData.depends;
+        if (!hasJsonInFiles && Array.isArray(meta.files)) {
+            meta.files.unshift('.json');
+        }
         try {
             await Editor.Message.request('asset-db', 'save-asset-meta', uuid, JSON.stringify(meta));
             console.log(`[pts-asset] Updated meta userData.__type__ = "${ptsContent.__type__}", depends=${depends.length} for ${data.name}`);
