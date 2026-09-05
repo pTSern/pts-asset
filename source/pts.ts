@@ -575,6 +575,272 @@ export function collectValuesFromDump(dumpValue: any): Record<string, any> {
     return result;
 }
 
+function getCleanText(str: string): string {
+    return (str || '').trim().toLowerCase().replace(/[\s_\-]/g, '');
+}
+
+function collectAllUiAssets(root: Element | DocumentFragment | null): HTMLElement[] {
+    const results: HTMLElement[] = [];
+    if (!root) return results;
+
+    const walk = (node: Element | DocumentFragment) => {
+        if (!node) return;
+        if ((node as HTMLElement).tagName === 'UI-ASSET') {
+            results.push(node as HTMLElement);
+        }
+        if (node.children) {
+            for (let i = 0; i < node.children.length; i++) {
+                const child = node.children[i];
+                walk(child);
+                if (child.shadowRoot) {
+                    walk(child.shadowRoot);
+                }
+            }
+        }
+    };
+    walk(root);
+    return results;
+}
+
+function resolveFieldInStruct(uiAsset: HTMLElement, boundaryEl: HTMLElement, structDump: any): any {
+    if (!structDump || typeof structDump.value !== 'object') return null;
+
+    const intermediateProps: HTMLElement[] = [];
+    let curr: HTMLElement | null = uiAsset.parentElement;
+    while (curr && curr !== boundaryEl) {
+        if (curr.tagName === 'UI-PROP') {
+            intermediateProps.unshift(curr);
+        }
+        curr = curr.parentElement;
+    }
+
+    let currentDump = structDump;
+
+    for (const propEl of intermediateProps) {
+        if (!currentDump || !currentDump.value || typeof currentDump.value !== 'object') break;
+
+        const valObj = currentDump.value;
+        const keys = Object.keys(valObj).filter(k => !_ignores.includes(k));
+        let matchedKey: string | null = null;
+
+        const propDumpName = (propEl as any)?.dump?.name;
+        if (propDumpName && valObj[propDumpName]) {
+            matchedKey = propDumpName;
+        }
+
+        if (!matchedKey) {
+            const attrName = propEl.getAttribute('data-key') || propEl.getAttribute('name') || propEl.getAttribute('data-name');
+            if (attrName && valObj[attrName]) {
+                matchedKey = attrName;
+            }
+        }
+
+        if (!matchedKey) {
+            const labelEl = propEl.querySelector('[slot="label"], ui-label');
+            const labelRaw = (labelEl?.getAttribute('value') || labelEl?.textContent || '').trim();
+            if (labelRaw) {
+                const cleanLabel = getCleanText(labelRaw);
+                for (const k of keys) {
+                    if (getCleanText(k) === cleanLabel || getCleanText(_format(k)) === cleanLabel) {
+                        matchedKey = k;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (matchedKey && valObj[matchedKey]) {
+            currentDump = valObj[matchedKey];
+            if (isAssetType(currentDump)) {
+                return currentDump;
+            }
+        }
+    }
+
+    if (isAssetType(currentDump)) {
+        return currentDump;
+    }
+
+    const targetObj = (currentDump && typeof currentDump.value === 'object' && !isAssetType(currentDump))
+        ? currentDump.value
+        : structDump.value;
+
+    if (!targetObj || typeof targetObj !== 'object') return null;
+
+    const availableKeys = Object.keys(targetObj).filter(k => !_ignores.includes(k));
+    const assetKeys = availableKeys.filter(k => isAssetType(targetObj[k]));
+
+    if (assetKeys.length === 1) {
+        return targetObj[assetKeys[0]];
+    }
+
+    const droppable = getCleanText(uiAsset.getAttribute('droppable') || (uiAsset as any).type || '');
+    if (droppable) {
+        for (const k of assetKeys) {
+            const fieldDump = targetObj[k];
+            const fieldType = getCleanText(fieldDump.type || '');
+            if (fieldType === droppable) return fieldDump;
+            if (Array.isArray(fieldDump.extends) && fieldDump.extends.some((ext: string) => getCleanText(ext) === droppable)) {
+                return fieldDump;
+            }
+        }
+    }
+
+    const labelEl = uiAsset.closest('ui-prop')?.querySelector('[slot="label"], ui-label');
+    const labelRaw = (labelEl?.getAttribute('value') || labelEl?.textContent || '').trim();
+    if (labelRaw) {
+        const cleanLabel = getCleanText(labelRaw);
+        for (const k of assetKeys) {
+            if (getCleanText(k) === cleanLabel || getCleanText(_format(k)) === cleanLabel) {
+                return targetObj[k];
+            }
+        }
+    }
+
+    if (assetKeys.length > 0) {
+        return targetObj[assetKeys[0]];
+    }
+
+    return null;
+}
+
+function resolveDumpForUiAsset(uiAsset: HTMLElement, rootDump: any = _lastDump): any {
+    if (!rootDump || !rootDump.value) return null;
+
+    const arrayItem = uiAsset.closest('.pts-array-item') as HTMLElement;
+    if (arrayItem) {
+        const key = arrayItem.dataset.key;
+        const indexStr = arrayItem.dataset.index;
+        if (key && indexStr !== undefined) {
+            const index = parseInt(indexStr, 10);
+            const arrayDump = rootDump.value[key];
+            if (arrayDump && Array.isArray(arrayDump.value)) {
+                const itemDump = arrayDump.value[index];
+                if (itemDump) {
+                    if (isAssetType(itemDump)) return itemDump;
+                    if (itemDump.value && typeof itemDump.value === 'object') {
+                        return resolveFieldInStruct(uiAsset, arrayItem, itemDump);
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    const basicProp = uiAsset.closest('.pts-basic-prop') as HTMLElement;
+    if (basicProp) {
+        const key = basicProp.dataset.key;
+        if (key) {
+            const propDump = rootDump.value[key];
+            if (propDump) {
+                if (isAssetType(propDump)) return propDump;
+                if (propDump.value && typeof propDump.value === 'object') {
+                    return resolveFieldInStruct(uiAsset, basicProp, propDump);
+                }
+            }
+        }
+        return null;
+    }
+
+    return null;
+}
+
+function syncUiAssetToDump(uiAsset: HTMLElement, rootDump: any = _lastDump): boolean {
+    if (!uiAsset || uiAsset.tagName !== 'UI-ASSET') return false;
+    const targetDump = resolveDumpForUiAsset(uiAsset, rootDump);
+    if (!targetDump) {
+        console.warn('[pTS Inspector] Could not resolve dump node for ui-asset:', uiAsset);
+        return false;
+    }
+    const val = (uiAsset as any).value || "";
+    console.log(`[pTS Inspector] Synced ui-asset (${targetDump.name || targetDump.type}) -> uuid: "${val}"`);
+    if (typeof targetDump.value === 'object' && targetDump.value !== null) {
+        targetDump.value.uuid = val;
+    } else {
+        targetDump.value = { uuid: val };
+    }
+    return true;
+}
+
+function bindUiAssetEvents(root: Element | DocumentFragment | null, onTrigger: () => void) {
+    if (!root) return;
+    const assets = collectAllUiAssets(root);
+    assets.forEach((assetEl: any) => {
+        if (assetEl.__pts_bound__) return;
+        assetEl.__pts_bound__ = true;
+
+        const handleUpdate = () => {
+            console.log(`[pTS Inspector] ui-asset event fired, new value:`, assetEl.value);
+            syncUiAssetToDump(assetEl, _lastDump);
+            onTrigger();
+        };
+
+        assetEl.addEventListener('change', handleUpdate);
+        assetEl.addEventListener('confirm', handleUpdate);
+        assetEl.addEventListener('drop', () => {
+            setTimeout(handleUpdate, 30);
+        });
+    });
+}
+
+function handleArrayResize(targetInput: any, onTrigger: () => void) {
+    const key = targetInput.dataset.key;
+    const newSize = parseInt(targetInput.value, 10);
+    if (isNaN(newSize) || newSize < 0) return;
+    if (!_lastDump?.value?.[key]) return;
+    const item = _lastDump.value[key];
+    const oldSize = Array.isArray(item.value) ? item.value.length : 0;
+    
+    if (newSize !== oldSize) {
+        if (newSize > oldSize) {
+            for (let i = oldSize; i < newSize; i++) {
+                const newItem = JSON.parse(JSON.stringify(item.elementTypeData));
+                item.value.push(newItem);
+            }
+        } else if (newSize < oldSize) {
+            item.value.length = newSize;
+        }
+        
+        const arraySection = targetInput.closest('.pts-array');
+        const elementsContainer = arraySection?.querySelector('.pts-array-elements');
+        const headerLabel = arraySection?.querySelector('ui-label[slot="header"]');
+        
+        if (headerLabel) {
+            headerLabel.value = `${_format(key)} [${newSize}]`;
+        }
+
+        if (elementsContainer) {
+            if (newSize > oldSize) {
+                for (let i = oldSize; i < newSize; i++) {
+                    const newProp = document.createElement('ui-prop') as any;
+                    newProp.setAttribute('type', 'dump');
+                    newProp.classList.add('pts-array-item');
+                    newProp.dataset.key = key;
+                    newProp.dataset.index = i.toString();
+                    newProp.dump = item.value[i];
+                    elementsContainer.appendChild(newProp);
+                    
+                    if (newProp.render) {
+                        newProp.render(item.value[i]);
+                    } else {
+                        setTimeout(() => { if (newProp.render) newProp.render(item.value[i]); }, 10);
+                    }
+                }
+                setTimeout(() => {
+                    bindUiAssetEvents(elementsContainer, onTrigger);
+                }, 30);
+            } else {
+                const items = elementsContainer.querySelectorAll('.pts-array-item');
+                for (let i = oldSize - 1; i >= newSize; i--) {
+                    items[i].remove();
+                }
+            }
+        }
+    }
+}
+
+let _currentTriggerAutoSave: (() => void) | null = null;
+
 async function renderView(this: PanelThis, dumpValue: any) {
     if (!dumpValue) return;
 
@@ -617,11 +883,22 @@ async function renderView(this: PanelThis, dumpValue: any) {
         const _item = dumpValue[_key];
         if (_item.isArray) {
             const elements = this.$.view.querySelectorAll(`.pts-array-item[data-key="${_key}"]`);
-            elements.forEach((el: any, index: number) => el.render(_item.value[index]));
+            elements.forEach((el: any, index: number) => {
+                el.dump = _item.value[index];
+                el.render(_item.value[index]);
+            });
         } else {
             const el = this.$.view.querySelector(`.pts-basic-prop[data-key="${_key}"]`) as any;
-            el?.render(_item);
+            if (el) {
+                el.dump = _item;
+                el.render(_item);
+            }
         }
+    });
+
+    // 4. Bind events to all rendered ui-asset elements
+    bindUiAssetEvents(this.$.view, () => {
+        if (_currentTriggerAutoSave) _currentTriggerAutoSave();
     });
 
     if (this.$.jsonDisplay && _currentAsset) {
@@ -690,6 +967,12 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         console.groupCollapsed("[pTS Inspector] Saving Asset: ", _currentAsset.displayName);
         console.log('Collecting values for saving...');
         
+        // Pre-save sweep: sync all ui-asset elements in DOM into _lastDump
+        const uiAssets = collectAllUiAssets(this.$.view);
+        for (const assetEl of uiAssets) {
+            syncUiAssetToDump(assetEl, _lastDump);
+        }
+
         // Update type if changed in UI
         if (this.$.ptsa && this.$.ptsa.value) {
             _cachedData.__type__ = this.$.ptsa.value;
@@ -704,8 +987,9 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         this.$.view.querySelectorAll('.pts-basic-prop').forEach((el: any) => {
             const key = el.dataset.key;
             const dump = el.dump || (_lastDump?.value && _lastDump.value[key]);
-            if (dump && dump.name) {
-                _cachedData.__value__[dump.name] = extractDumpValue(dump);
+            if (dump) {
+                const propName = dump.name || key;
+                _cachedData.__value__[propName] = extractDumpValue(dump);
             }
         });
 
@@ -719,7 +1003,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         });
         this.$.view.querySelectorAll('.pts-array-item').forEach((el: any) => {
             const key = el.dataset.key;
-            const index = parseInt(el.dataset.index);
+            const index = parseInt(el.dataset.index, 10);
             const dump = el.dump || (_lastDump?.value && _lastDump.value[key]?.value?.[index]);
             if (dump) {
                 if (!arrayValues[key]) arrayValues[key] = [];
@@ -789,70 +1073,53 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         }
     };
 
-    this.$.view.onchange = (e: any) => {
-        if (e.target.classList.contains('pts-array-size')) {
-            const key = e.target.dataset.key;
-            const newSize = parseInt(e.target.value);
-            const item = _lastDump.value[key];
-            const oldSize = item.value.length;
-            
-            if (newSize !== oldSize) {
-                if (newSize > oldSize) {
-                    for (let i = oldSize; i < newSize; i++) {
-                        const newItem = JSON.parse(JSON.stringify(item.elementTypeData));
-                        item.value.push(newItem);
-                    }
-                } else if (newSize < oldSize) {
-                    item.value.length = newSize;
-                }
-                
-                // Manual DOM update to prevent full re-render and UI reset
-                const arraySection = e.target.closest('.pts-array');
-                const elementsContainer = arraySection.querySelector('.pts-array-elements');
-                const headerLabel = arraySection.querySelector('ui-label[slot="header"]');
-                
-                if (headerLabel) {
-                    headerLabel.value = `${_format(key)} [${newSize}]`;
-                }
+    _currentTriggerAutoSave = triggerAutoSave;
 
-                if (newSize > oldSize) {
-                    for (let i = oldSize; i < newSize; i++) {
-                        const newProp = document.createElement('ui-prop') as any;
-                        newProp.setAttribute('type', 'dump');
-                        newProp.classList.add('pts-array-item');
-                        newProp.dataset.key = key;
-                        newProp.dataset.index = i.toString();
-                        elementsContainer.appendChild(newProp);
-                        
-                        // Render the new item immediately if possible, or wait for web component readiness
-                        if (newProp.render) {
-                            newProp.render(item.value[i]);
-                        } else {
-                            setTimeout(() => { if (newProp.render) newProp.render(item.value[i]); }, 10);
-                        }
-                    }
-                } else {
-                    const items = elementsContainer.querySelectorAll('.pts-array-item');
-                    for (let i = oldSize - 1; i >= newSize; i--) {
-                        items[i].remove();
-                    }
-                }
+    // Attach capture-phase listeners on view once to intercept all input/change/confirm/drop events
+    if (!this.$.view.__pts_captured__) {
+        this.$.view.__pts_captured__ = true;
+
+        const onUserAction = (e: Event) => {
+            const path = e.composedPath ? e.composedPath() : [e.target];
+            const uiAsset = path.find((node: any) => node && node.tagName === 'UI-ASSET') as HTMLElement;
+            if (uiAsset) {
+                console.log(`[pTS Inspector] Capture event (${e.type}) on <ui-asset>, value:`, (uiAsset as any).value);
+                syncUiAssetToDump(uiAsset, _lastDump);
             }
-        }
-        triggerAutoSave();
-    };
+            if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+        };
 
-    this.$.view.addEventListener('confirm', () => {
-        triggerAutoSave();
-    });
+        this.$.view.addEventListener('change', (e: any) => {
+            if (e.target && e.target.classList && e.target.classList.contains('pts-array-size')) {
+                handleArrayResize(e.target, () => {
+                    if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                });
+            }
+            onUserAction(e);
+        }, true);
+
+        this.$.view.addEventListener('confirm', onUserAction, true);
+        this.$.view.addEventListener('input', onUserAction, true);
+        this.$.view.addEventListener('drop', (e: Event) => {
+            setTimeout(() => {
+                const path = e.composedPath ? e.composedPath() : [e.target];
+                const uiAsset = path.find((node: any) => node && node.tagName === 'UI-ASSET') as HTMLElement;
+                if (uiAsset) {
+                    syncUiAssetToDump(uiAsset, _lastDump);
+                }
+                if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+            }, 30);
+        }, true);
+    }
 
     if (this.$.ptsa) {
-        this.$.ptsa.addEventListener('change', () => {
+        this.$.ptsa.onchange = () => {
             triggerAutoSave();
-        });
+        };
     }
 
     this.$.save.onclick = async () => {
+        if (_autoSaveTimer) clearTimeout(_autoSaveTimer);
         await saveAsset();
     };
 
