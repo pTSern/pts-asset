@@ -382,9 +382,9 @@ export async function createAndInitPtsAsset(assetInfo: MenuAssetInfo | undefined
                 meta.userData = meta.userData || {};
                 meta.userData.__type__ = className;
                 meta.userData.__depends__ = depends;
-                meta.userData.depends = depends;
+                delete meta.userData.depends;
                 await Editor.Message.request('asset-db', 'save-asset-meta', finalAsset.uuid, JSON.stringify(meta));
-                console.log(`[pts-asset] Meta initialized with __type__ = "${className}", depends =`, depends);
+                console.log(`[pts-asset] Meta initialized with __type__ = "${className}", __depends__ =`, depends);
             }
         } catch (metaErr) {
             console.error('[pts-asset] Failed to update meta for new asset:', metaErr);

@@ -123,9 +123,19 @@
                 "path": "i18n:menu.extension/pTS Asset",
                 "label": "Update .pts Assets",
                 "message": "pts::importer::lookup"
+            },
+            {
+                "path": "i18n:menu.extension/pTS Asset",
+                "label": "Re-Scan & Sync Lazy Prefab",
+                "message": "sync-lazy-prefab"
             }
         ],
         "messages": {
+            "sync-lazy-prefab": {
+                "methods": [
+                    "syncLazyPrefab"
+                ]
+            },
 
             "_cc:log": {
                 "methods": [

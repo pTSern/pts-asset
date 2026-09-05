@@ -60,18 +60,81 @@ interface PendingAssetRef {
 }
 
 const _pendingAssetRefs: PendingAssetRef[] = [];
+const _inFlightAssetLoads = new Map<string, Promise<Asset | null>>();
+const _visitingUuids = new Set<string>();
 
-function _registerPendingAssetRef(target: any, propKey: string, uuid: string) {
-    if (!target || !propKey || !uuid) return;
-    _pendingAssetRefs.push({ target, propKey, uuid });
+function _loadAssetByUuid(uuid: string, target?: any, propKey?: string): Promise<Asset | null> {
+    if (!uuid) return Promise.resolve(null);
 
-    if (typeof assetManager !== 'undefined' && typeof assetManager.loadAny === 'function') {
-        assetManager.loadAny({ uuid }, (err: any, loadedAsset: any) => {
-            if (!err && loadedAsset) {
-                target[propKey] = loadedAsset;
+    const existing = _findAssetByUuid(uuid);
+    if (existing) {
+        if (target && propKey) {
+            target[propKey] = existing;
+        }
+        const childDeps = (existing as any).__pending_deps_promise__;
+        if (childDeps) {
+            return childDeps.then(() => existing).catch(() => existing);
+        }
+        return Promise.resolve(existing);
+    }
+
+    if (_inFlightAssetLoads.has(uuid)) {
+        return _inFlightAssetLoads.get(uuid)!.then((loaded) => {
+            if (loaded && target && propKey) {
+                target[propKey] = loaded;
             }
+            return loaded;
         });
     }
+
+    if (_visitingUuids.has(uuid)) {
+        return Promise.resolve(null);
+    }
+
+    const loadPromise = new Promise<Asset | null>((resolve) => {
+        if (typeof assetManager === 'undefined' || typeof assetManager.loadAny !== 'function') {
+            console.warn(`[pTSAsset] assetManager.loadAny not available to load dependency ${uuid}`);
+            resolve(null);
+            return;
+        }
+
+        _visitingUuids.add(uuid);
+
+        assetManager.loadAny({ uuid }, (err: any, loadedAsset: any) => {
+            _visitingUuids.delete(uuid);
+
+            if (err) {
+                console.error(`[pTSAsset] Failed to load dependency asset (uuid: ${uuid}):`, err);
+                resolve(null);
+                return;
+            }
+
+            if (target && propKey && loadedAsset) {
+                target[propKey] = loadedAsset;
+            }
+
+            const childDeps = loadedAsset && (loadedAsset as any).__pending_deps_promise__;
+            if (childDeps) {
+                childDeps.then(() => resolve(loadedAsset)).catch(() => resolve(loadedAsset));
+            } else {
+                resolve(loadedAsset || null);
+            }
+        });
+    });
+
+    _inFlightAssetLoads.set(uuid, loadPromise);
+
+    loadPromise.finally(() => {
+        _inFlightAssetLoads.delete(uuid);
+    });
+
+    return loadPromise;
+}
+
+function _registerPendingAssetRef(target: any, propKey: string, uuid: string): Promise<Asset | null> {
+    if (!target || !propKey || !uuid) return Promise.resolve(null);
+    _pendingAssetRefs.push({ target, propKey, uuid });
+    return _loadAssetByUuid(uuid, target, propKey);
 }
 
 function _findAssetInBundles(uuid: string): Asset | null {
@@ -255,7 +318,7 @@ function _resolveGradient(data: any): Gradient {
 }
 
 // ─── 8. Recursive Value Resolver ───
-function _resolveValue(val: any, expectedCtor?: any, target?: any, propKey?: string): any {
+function _resolveValue(val: any, expectedCtor?: any, target?: any, propKey?: string, depsOut?: Promise<any>[]): any {
     if (val === null || val === undefined) return val;
     if (typeof val !== 'object') return val;
 
@@ -288,7 +351,7 @@ function _resolveValue(val: any, expectedCtor?: any, target?: any, propKey?: str
         const arr: any[] = [];
         const elemCtor = Array.isArray(expectedCtor) ? expectedCtor[0] : expectedCtor;
         for (let i = 0; i < val.length; i++) {
-            arr[i] = _resolveValue(val[i], elemCtor, arr, String(i));
+            arr[i] = _resolveValue(val[i], elemCtor, arr, String(i), depsOut);
         }
         return arr;
     }
@@ -306,10 +369,13 @@ function _resolveValue(val: any, expectedCtor?: any, target?: any, propKey?: str
 
             if (target && propKey) {
                 _setupAssetLazyGetter(target, propKey, uuid);
-                if (!loaded) {
-                    _registerPendingAssetRef(target, propKey, uuid);
-                }
             }
+
+            const p = _loadAssetByUuid(uuid, target, propKey);
+            if (depsOut) {
+                depsOut.push(p);
+            }
+
             return loaded || null;
         }
 
@@ -328,7 +394,7 @@ function _resolveValue(val: any, expectedCtor?: any, target?: any, propKey?: str
         const subProps = pEngine?.NodeUtils?.getAttr ? pEngine.NodeUtils.getAttr(cls) : null;
         for (const k in vMap) {
             const subCtor = subProps?.[k]?.ctor;
-            instance[k] = _resolveValue(vMap[k], subCtor, instance, k);
+            instance[k] = _resolveValue(vMap[k], subCtor, instance, k, depsOut);
         }
 
         // Apply defaults for missing properties
@@ -352,7 +418,7 @@ function _resolveValue(val: any, expectedCtor?: any, target?: any, propKey?: str
             const subProps = pEngine?.NodeUtils?.getAttr ? pEngine.NodeUtils.getAttr(expectedCtor) : null;
             for (const k in val) {
                 const subCtor = subProps?.[k]?.ctor;
-                instance[k] = _resolveValue(val[k], subCtor, instance, k);
+                instance[k] = _resolveValue(val[k], subCtor, instance, k, depsOut);
             }
             if (subProps) {
                 for (const k in subProps) {
@@ -370,7 +436,7 @@ function _resolveValue(val: any, expectedCtor?: any, target?: any, propKey?: str
 
     const out: Record<string, any> = {};
     for (const k in val) {
-        out[k] = _resolveValue(val[k]);
+        out[k] = _resolveValue(val[k], undefined, out, k, depsOut);
     }
     return out;
 }
@@ -415,6 +481,7 @@ function _hydrate(asset: Asset, ptsJson: any): void {
 
     const _applyProperties = () => {
         try {
+            const depsPromises: Promise<any>[] = [];
             const _props = pEngine?.NodeUtils?.getAttr ? pEngine.NodeUtils.getAttr(targetClass) : null;
 
             if (_props) {
@@ -460,7 +527,7 @@ function _hydrate(asset: Asset, ptsJson: any): void {
                     }
 
                     const rawVal = __value__[_key];
-                    (asset as any)[_key] = _resolveValue(rawVal, propCtor, asset, _key);
+                    (asset as any)[_key] = _resolveValue(rawVal, propCtor, asset, _key, depsPromises);
                     if (isArray && ((asset as any)[_key] === undefined || (asset as any)[_key] === null)) {
                         (asset as any)[_key] = [];
                     }
@@ -470,7 +537,7 @@ function _hydrate(asset: Asset, ptsJson: any): void {
             // Apply any remaining values in __value__ not in _props
             for (const _key in __value__) {
                 if (!_props || !(_key in _props)) {
-                    (asset as any)[_key] = _resolveValue(__value__[_key], undefined, asset, _key);
+                    (asset as any)[_key] = _resolveValue(__value__[_key], undefined, asset, _key, depsPromises);
                 }
             }
 
@@ -485,8 +552,14 @@ function _hydrate(asset: Asset, ptsJson: any): void {
                 }
             }
 
-            // Call hydrate/onLoad ONCE after all properties have been resolved and applied!
-            (asset as any)['hydrate']?.();
+            const allDepsPromise = depsPromises.length > 0
+                ? Promise.all(depsPromises)
+                : Promise.resolve();
+
+            (asset as any).__pending_deps_promise__ = allDepsPromise;
+
+            // Call hydrate with allDepsPromise so _onAwake is deferred until dependencies resolve!
+            (asset as any)['hydrate']?.(allDepsPromise);
         } catch (err) {
             console.error(`[pTSAsset] Error applying properties for ${__type__}:`, err);
         }
