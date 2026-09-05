@@ -1,5 +1,5 @@
 import pkg from '../package.json';
-import { scanProjectPtsClasses } from './asset-menu';
+import { getRegisteredClasses, scanProjectPtsClasses } from './asset-menu';
 
 export const template = `
 <div class="panel-container">
@@ -149,29 +149,7 @@ async function updateUIValues(panel: any) {
 
 async function loadRegisteredClasses(panel: any) {
     if (!panel.$.classesList) return;
-    const allClasses = new Set<string>();
-
-    try {
-        const classes = await Editor.Message.request('scene', 'execute-scene-script', {
-            name: 'pts-core',
-            method: 'get_registered_pts_classes',
-            args: []
-        });
-        if (Array.isArray(classes)) {
-            for (const c of classes) {
-                if (c && typeof c === 'string') allClasses.add(c);
-            }
-        }
-    } catch (e) {}
-
-    try {
-        const scanned = scanProjectPtsClasses();
-        for (const c of scanned) {
-            allClasses.add(c);
-        }
-    } catch (e) {}
-
-    const sorted = Array.from(allClasses).sort();
+    const sorted = await getRegisteredClasses();
     if (sorted.length > 0) {
         panel.$.classesList.innerHTML = sorted.map((c: string) => `<div>• <strong>${c}</strong></div>`).join('');
     } else {
