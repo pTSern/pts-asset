@@ -19,7 +19,7 @@ export abstract class pTSAsset_Data<_TType = any, _TOut = _TType> extends pTSAss
     set(value: _TType) {
         if(this.data === value) return;
         this.emit('onChanged', value, this._clone(this.data));
-        console.log(`pTSAsset_Data_[${this.name}]: set >>> `, value);
+        console.log(`[x000] \t\t pTSAsset_Data_[${this.name}]: set >>> `, value);
         this.data = value;
     }
 

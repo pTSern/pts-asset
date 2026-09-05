@@ -4,6 +4,7 @@ import path from 'path'
 
 import { AssetInfo, IAssetMeta } from '@cocos/creator-types/editor/packages/asset-db/@types/public'
 import { getExtendsChain, setRuntimeInheritanceChains, clearInheritanceCache } from './inheritance'
+import { rescanAndSyncLazyPrefab } from './lazy-registry'
 
 function openUrl(url: string) {
     try {
@@ -72,6 +73,11 @@ export const methods: { [key: string]: (...any: any) => any } = {
             if(!_meta) continue;
             await _patchPtsLibrary(_.uuid, _, _meta);
         }
+    },
+    syncLazyPrefab() {
+        const report = rescanAndSyncLazyPrefab();
+        console.log(`[pTS Asset] Re-scanned and synced _lazy.prefab: kept ${report.addedToLazy.length} unprotected assets, skipped ${report.skippedAlreadyReferenced.length} already referenced, excluded ${report.deadPts.length} dead.`);
+        return report;
     },
     onDropAssetPts(info, drag) {
         console.log('onDropAssetPts', info);
@@ -227,12 +233,12 @@ async function _patchPtsLibraryInternal(uuid: string, data: any, meta: any) {
     const depends = extractAssetDependencies(ptsContent);
 
     // Store __type__ and __depends__ in meta.userData for reference
-    const needMetaUpdate = meta.userData?.__type__ !== ptsContent.__type__ || JSON.stringify(meta.userData?.__depends__) !== JSON.stringify(depends);
+    const needMetaUpdate = meta.userData?.__type__ !== ptsContent.__type__ || JSON.stringify(meta.userData?.__depends__) !== JSON.stringify(depends) || 'depends' in (meta.userData || {});
     if (needMetaUpdate) {
         meta.userData = meta.userData || {};
         meta.userData.__type__ = ptsContent.__type__;
         meta.userData.__depends__ = depends;
-        meta.userData.depends = depends;
+        delete meta.userData.depends;
         try {
             await Editor.Message.request('asset-db', 'save-asset-meta', uuid, JSON.stringify(meta));
             console.log(`[pts-asset] Updated meta userData.__type__ = "${ptsContent.__type__}", depends=${depends.length} for ${data.name}`);

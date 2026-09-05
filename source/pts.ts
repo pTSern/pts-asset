@@ -73,15 +73,17 @@ export const $ = {
     ptsa: "#pts-asset",
     save: "#save-button",
     fix: "#fix-button",
+    lazyToggle: "#lazy-toggle",
     jsonToggle: "#json-toggle",
     jsonDisplay: "#json-display"
 };
 
 export const template = `
 <div class="pts-container" style="display: flex; flex-direction: column; height: 100%;">
-    <div style="display: flex; gap: 8px; padding: 10px; background: #333; border-bottom: 1px solid #555; z-index: 10;">
+    <div style="display: flex; align-items: center; gap: 8px; padding: 10px; background: #333; border-bottom: 1px solid #555; z-index: 10;">
         <ui-button id="save-button" class="blue" style="flex: 1;">Save Changes</ui-button>
         <ui-button id="fix-button" class="orange" style="width: 80px;">Fix</ui-button>
+        <ui-checkbox id="lazy-toggle" style="margin-left: 4px;" tooltip="Keep this asset alive in _lazy.prefab along with unreferenced dependencies">Lazy</ui-checkbox>
     </div>
     <div style="flex: 1; overflow-y: auto; padding: 10px;">
         <ui-section class="component config" cache-expand="node-component:pTS" expand>
@@ -105,6 +107,8 @@ type PanelThis = Selector<typeof $>;
 let _cachedData: any = null;
 let _currentAsset: Asset | null = null;
 let _lastDump: any = null;
+let _isUpdatingUi = false;
+let _lastLazyState: boolean | null = null;
 
 function isNodeOrComponent(dump: any): boolean {
     if (!dump) return false;
@@ -907,11 +911,64 @@ async function renderView(this: PanelThis, dumpValue: any) {
     }
 }
 
+function setupLazyToggle(panel: PanelThis) {
+    if (!panel.$.lazyToggle || panel.$.lazyToggle.__pts_bound__) return;
+    panel.$.lazyToggle.__pts_bound__ = true;
+
+    const onLazyToggleChanged = async () => {
+        if (_isUpdatingUi || !_currentAsset) return;
+        const newLazy = !!(panel.$.lazyToggle.value || panel.$.lazyToggle.checked);
+        if (newLazy === _lastLazyState) return;
+        _lastLazyState = newLazy;
+
+        console.log(`[pTS Inspector] Lazy toggle changed for ${_currentAsset.displayName} (${_currentAsset.uuid}): ${newLazy}`);
+
+        try {
+            const meta = await Editor.Message.request('asset-db', 'query-asset-meta', _currentAsset.uuid);
+            if (meta) {
+                meta.userData = meta.userData || {};
+                meta.userData.isLazy = newLazy;
+                await Editor.Message.request('asset-db', 'save-asset-meta', _currentAsset.uuid, JSON.stringify(meta));
+                console.log(`[pTS Inspector] Saved meta isLazy=${newLazy} for ${_currentAsset.displayName}`);
+            }
+            if (panel.metaList && panel.metaList[0]) {
+                panel.metaList[0].userData = panel.metaList[0].userData || {};
+                panel.metaList[0].userData.isLazy = newLazy;
+            }
+        } catch (e) {
+            console.error('[pTS Inspector] Failed to update meta.userData.isLazy:', e);
+        }
+
+        try {
+            const report = await Editor.Message.request('pts-asset', 'sync-lazy-prefab');
+            console.log('[pTS Inspector] Lazy Prefab Synced after toggle:', report);
+        } catch (e) {
+            console.error('[pTS Inspector] Failed to sync lazy prefab:', e);
+        }
+    };
+
+    panel.$.lazyToggle.addEventListener('change', onLazyToggleChanged);
+    panel.$.lazyToggle.addEventListener('confirm', onLazyToggleChanged);
+}
+
 export async function update(this: PanelThis, assetList: AssetInfo[], metaList: Meta[]) {
     this.assetList = assetList;
     this.metaList = metaList;
 
     if(!this.metaList || this.assetList.length === 0) return;
+
+    setupLazyToggle(this);
+
+    _isUpdatingUi = true;
+    try {
+        if (this.$.lazyToggle) {
+            const isLazy = !!(this.metaList && this.metaList[0]?.userData?.isLazy);
+            this.$.lazyToggle.value = isLazy;
+            _lastLazyState = isLazy;
+        }
+    } finally {
+        _isUpdatingUi = false;
+    }
 
     const newAsset = this.assetList[0];
     if (_currentAsset && _currentAsset.uuid === newAsset.uuid && _lastDump) {
@@ -1046,9 +1103,12 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 meta.userData = meta.userData || {};
                 meta.userData.__type__ = _cachedData.__type__;
                 meta.userData.__depends__ = depends;
-                meta.userData.depends = depends;
+                delete meta.userData.depends;
+                if (this.$.lazyToggle) {
+                    meta.userData.isLazy = !!(this.$.lazyToggle.value || this.$.lazyToggle.checked);
+                }
                 await Editor.Message.request('asset-db', 'save-asset-meta', _currentAsset.uuid, JSON.stringify(meta));
-                console.log(`[pTS Inspector] Saved meta with depends:`, depends);
+                console.log(`[pTS Inspector] Saved meta with __depends__:`, depends);
             }
         } catch (err) {
             console.error('[pTS Inspector] Failed to save meta dependencies:', err);
@@ -1196,7 +1256,10 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 meta.userData = meta.userData || {};
                 meta.userData.__type__ = targetType;
                 meta.userData.__depends__ = depends;
-                meta.userData.depends = depends;
+                delete meta.userData.depends;
+                if (this.$.lazyToggle) {
+                    meta.userData.isLazy = !!(this.$.lazyToggle.value || this.$.lazyToggle.checked);
+                }
                 await Editor.Message.request('asset-db', 'save-asset-meta', _currentAsset.uuid, JSON.stringify(meta));
                 console.log(`[pTS Inspector] Fixed meta userData.__type__ = "${targetType}", __depends__=`, depends);
             }
@@ -1244,6 +1307,7 @@ export function ready(this: PanelThis) {
             }
         });
     }
+    setupLazyToggle(this);
 }
 
 export function close(this: PanelThis, ) {
