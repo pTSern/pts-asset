@@ -202,6 +202,16 @@
                 "methods": [
                     "profile::project::changed_isAutoSave"
                 ]
+            },
+            "sync-preview-data": {
+                "methods": [
+                    "syncPreviewData"
+                ]
+            },
+            "query-preview-data": {
+                "methods": [
+                    "queryPreviewData"
+                ]
             }
         }
     }

@@ -75,11 +75,18 @@ export const $ = {
     fix: "#fix-button",
     lazyToggle: "#lazy-toggle",
     jsonToggle: "#json-toggle",
-    jsonDisplay: "#json-display"
+    jsonDisplay: "#json-display",
+    previewBanner: "#preview-banner",
+    previewStatusText: "#preview-status-text",
+    previewSubText: "#preview-sub-text"
 };
 
 export const template = `
 <div class="pts-container" style="display: flex; flex-direction: column; height: 100%;">
+    <div id="preview-banner" style="display: none; align-items: center; justify-content: space-between; padding: 6px 12px; background: #2e7d32; color: #fff; font-weight: bold; font-size: 12px; border-bottom: 1px solid #4caf50; z-index: 11;">
+        <span id="preview-status-text">🟢 Live Preview Mode (Read-Only)</span>
+        <span id="preview-sub-text" style="font-size: 11px; opacity: 0.9;">Runtime Instance Linked</span>
+    </div>
     <div style="display: flex; align-items: center; gap: 8px; padding: 10px; background: #333; border-bottom: 1px solid #555; z-index: 10;">
         <ui-button id="save-button" class="blue" style="flex: 1;">Save Changes</ui-button>
         <ui-button id="fix-button" class="orange" style="width: 80px;">Fix</ui-button>
@@ -109,6 +116,170 @@ let _currentAsset: Asset | null = null;
 let _lastDump: any = null;
 let _isUpdatingUi = false;
 let _lastLazyState: boolean | null = null;
+let _isInLivePreviewMode = false;
+let _previewPollTimer: any = null;
+let _livePreviewValues: Record<string, any> | null = null;
+
+function setPreviewModeUI(panel: PanelThis, isPreview: boolean, foundInstance: boolean) {
+    _isInLivePreviewMode = isPreview;
+    if (!isPreview) {
+        _livePreviewValues = null;
+    }
+    if (panel.$.previewBanner) {
+        panel.$.previewBanner.style.display = isPreview ? 'flex' : 'none';
+        if (isPreview) {
+            panel.$.previewBanner.style.background = foundInstance ? '#2e7d32' : '#e65100';
+            panel.$.previewBanner.style.borderColor = foundInstance ? '#4caf50' : '#ff9800';
+            if (panel.$.previewStatusText) {
+                panel.$.previewStatusText.textContent = foundInstance
+                    ? '🟢 Live Preview Mode (Read-Only)'
+                    : '🟠 Live Preview Mode';
+            }
+            if (panel.$.previewSubText) {
+                panel.$.previewSubText.textContent = foundInstance
+                    ? 'Runtime Instance Linked'
+                    : 'Waiting for runtime instance...';
+            }
+        }
+    }
+    if (panel.$.save) {
+        panel.$.save.disabled = isPreview;
+        panel.$.save.style.opacity = isPreview ? '0.4' : '1';
+        panel.$.save.title = isPreview ? 'Saving is disabled in Live Preview Mode (Read-Only)' : '';
+    }
+    if (panel.$.fix) {
+        panel.$.fix.disabled = isPreview;
+        panel.$.fix.style.opacity = isPreview ? '0.4' : '1';
+        panel.$.fix.title = isPreview ? 'Fix is disabled in Live Preview Mode' : '';
+    }
+    if (panel.$.lazyToggle) {
+        panel.$.lazyToggle.disabled = isPreview;
+        panel.$.lazyToggle.style.opacity = isPreview ? '0.4' : '1';
+    }
+}
+
+function stopPreviewPolling() {
+    if (_previewPollTimer) {
+        clearInterval(_previewPollTimer);
+        _previewPollTimer = null;
+    }
+}
+
+function startPreviewPolling(panel: PanelThis) {
+    stopPreviewPolling();
+    _previewPollTimer = setInterval(() => {
+        refreshLiveState(panel);
+    }, 250);
+}
+
+async function refreshLiveState(panel: PanelThis) {
+    if (!_currentAsset) return;
+
+    try {
+        const assetName = _currentAsset.displayName ? _currentAsset.displayName.replace(/\.pts$/, '') : (_currentAsset.name || '');
+        let state = await Editor.Message.request(
+            'pts-asset',
+            'query-preview-data',
+            _currentAsset.uuid,
+            _cachedData?.__type__ || '',
+            assetName
+        ) as any;
+
+        // Fallback: check scene script if needed
+        if (!state || !state.isPreview) {
+            try {
+                const sceneState = await Editor.Message.request(
+                    'scene',
+                    'execute-scene-script',
+                    {
+                        name: 'pts-core',
+                        method: 'get_pts_runtime_state',
+                        args: [_currentAsset.uuid, _cachedData?.__type__ || '']
+                    }
+                ) as any;
+                if (sceneState && sceneState.isPreview) {
+                    state = sceneState;
+                }
+            } catch {}
+        }
+
+        if (!state || !state.isPreview) {
+            if (_isInLivePreviewMode) {
+                // Preview stopped! Switch back to normal design mode
+                setPreviewModeUI(panel, false, false);
+                stopPreviewPolling();
+                _livePreviewValues = null;
+                if (_currentAsset && _currentAsset.file) {
+                    try {
+                        const fileContent = fs.readFileSync(_currentAsset.file, { encoding: 'utf8' });
+                        _cachedData = JSON.parse(fileContent);
+                        if (_lastDump && _lastDump.value) {
+                            renderView.call(panel, _lastDump.value);
+                        }
+                    } catch {}
+                }
+            }
+            return;
+        }
+
+        setPreviewModeUI(panel, true, !!state.found);
+
+        if (state.found && state.values && _lastDump && _lastDump.value) {
+            _livePreviewValues = state.values;
+            updateLiveDumpAndFields(panel, state.values);
+        }
+    } catch {}
+}
+
+function updateLiveDumpAndFields(panel: PanelThis, liveValues: Record<string, any>) {
+    if (!panel.$.view || !_lastDump || !_lastDump.value) return;
+
+    let needsFullReRender = false;
+
+    for (const key of Object.keys(liveValues)) {
+        if (_ignores.includes(key)) continue;
+        const liveVal = liveValues[key];
+        const dumpItem = _lastDump.value[key];
+        if (!dumpItem) continue;
+
+        const prevArrayLen = dumpItem.isArray && Array.isArray(dumpItem.value) ? dumpItem.value.length : -1;
+        populateDumpWithSaved(dumpItem, liveVal);
+
+        if (dumpItem.isArray) {
+            const newArrayLen = Array.isArray(dumpItem.value) ? dumpItem.value.length : 0;
+            if (prevArrayLen !== newArrayLen) {
+                needsFullReRender = true;
+            } else {
+                const items = panel.$.view.querySelectorAll(`.pts-array-item[data-key="${key}"]`);
+                if (items.length === newArrayLen) {
+                    items.forEach((el: any, index: number) => {
+                        el.dump = dumpItem.value[index];
+                        if (el.render) el.render(dumpItem.value[index]);
+                    });
+                } else {
+                    needsFullReRender = true;
+                }
+            }
+        } else {
+            const el = panel.$.view.querySelector(`.pts-basic-prop[data-key="${key}"]`) as any;
+            if (el) {
+                el.dump = dumpItem;
+                if (el.render) el.render(dumpItem);
+            }
+        }
+    }
+
+    if (needsFullReRender) {
+        renderView.call(panel, _lastDump.value);
+    }
+
+    if (panel.$.jsonDisplay && panel.$.jsonToggle && (panel.$.jsonToggle.value || panel.$.jsonToggle.checked)) {
+        panel.$.jsonDisplay.textContent = JSON.stringify({
+            __type__: _cachedData?.__type__,
+            __value__: liveValues
+        }, null, 4);
+    }
+}
 
 function isNodeOrComponent(dump: any): boolean {
     if (!dump) return false;
@@ -851,7 +1022,10 @@ async function renderView(this: PanelThis, dumpValue: any) {
     const _keys = Object.keys(dumpValue).filter(k => !_ignores.includes(k));
 
     console.log("[Inspector] Rendering View");
-    const _val = (_cachedData && _cachedData.__value__) || {};
+    const _baseVal = (_cachedData && _cachedData.__value__) || {};
+    const _val = (_isInLivePreviewMode && _livePreviewValues)
+        ? Object.assign({}, _baseVal, _livePreviewValues)
+        : _baseVal;
 
     // 1. Populate dump tree with saved values (or fallback to defaults if missing/empty)
     _keys.forEach(_cur => {
@@ -906,8 +1080,15 @@ async function renderView(this: PanelThis, dumpValue: any) {
     });
 
     if (this.$.jsonDisplay && _currentAsset) {
-        const _fileContent = fs.readFileSync(_currentAsset.file, { encoding: 'utf8' });
-        this.$.jsonDisplay.textContent = _fileContent;
+        if (_isInLivePreviewMode && _livePreviewValues) {
+            this.$.jsonDisplay.textContent = JSON.stringify({
+                __type__: _cachedData?.__type__,
+                __value__: _livePreviewValues
+            }, null, 4);
+        } else {
+            const _fileContent = fs.readFileSync(_currentAsset.file, { encoding: 'utf8' });
+            this.$.jsonDisplay.textContent = _fileContent;
+        }
     }
 }
 
@@ -916,6 +1097,7 @@ function setupLazyToggle(panel: PanelThis) {
     panel.$.lazyToggle.__pts_bound__ = true;
 
     const onLazyToggleChanged = async () => {
+        if (_isInLivePreviewMode) return;
         if (_isUpdatingUi || !_currentAsset) return;
         const newLazy = !!(panel.$.lazyToggle.value || panel.$.lazyToggle.checked);
         if (newLazy === _lastLazyState) return;
@@ -992,6 +1174,56 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
 
     this.$this.style.order = '-1';
 
+    // 1. Check if running in Editor Preview Mode
+    const assetName = _currentAsset.displayName ? _currentAsset.displayName.replace(/\.pts$/, '') : (_currentAsset.name || '');
+    let runtimeState: any = null;
+    try {
+        runtimeState = await Editor.Message.request(
+            'pts-asset',
+            'query-preview-data',
+            _currentAsset.uuid,
+            _cachedData.__type__,
+            assetName
+        );
+    } catch (e) {
+        console.warn('[pTS Inspector] Failed to query preview data:', e);
+    }
+
+    // Fallback: check scene script
+    if (!runtimeState || !runtimeState.isPreview) {
+        try {
+            const sceneState = await Editor.Message.request(
+                'scene',
+                'execute-scene-script',
+                {
+                    name: 'pts-core',
+                    method: 'get_pts_runtime_state',
+                    args: [_currentAsset.uuid, _cachedData.__type__]
+                }
+            );
+            if (sceneState && sceneState.isPreview) {
+                runtimeState = sceneState;
+            }
+        } catch {}
+    }
+
+    const isPreview = !!(runtimeState && runtimeState.isPreview);
+    const foundInstance = !!(runtimeState && runtimeState.found);
+
+    if (isPreview && foundInstance && runtimeState.values) {
+        _livePreviewValues = runtimeState.values;
+    } else if (!isPreview) {
+        _livePreviewValues = null;
+    }
+
+    setPreviewModeUI(this, isPreview, foundInstance);
+
+    if (isPreview) {
+        startPreviewPolling(this);
+    } else {
+        stopPreviewPolling();
+    }
+
     Editor.Message.request(
         'scene',
         'execute-scene-script',
@@ -1008,7 +1240,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             return;
         }
 
-        const _val = _out.value
+        const _val = _out.value;
         if(!_val) {
             console.warn("Dumper output does not contain 'value' property.");
             return;
@@ -1016,9 +1248,13 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
 
         _lastDump = _out;
         renderView.call(this, _val);
-    })
+    });
 
     const saveAsset = async () => {
+        if (_isInLivePreviewMode) {
+            console.warn('[pTS Inspector] Saving is disabled in Live Preview Mode (Read-Only).');
+            return;
+        }
         if (!_currentAsset || !_cachedData) return;
 
         console.groupCollapsed("[pTS Inspector] Saving Asset: ", _currentAsset.displayName);
@@ -1119,6 +1355,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
 
     let _autoSaveTimer: any = null;
     const triggerAutoSave = async () => {
+        if (_isInLivePreviewMode) return;
         try {
             const profile = await Editor.Profile.getProject('pts-asset') as any || {};
             const isAutoSave = typeof profile.isAutoSave === 'boolean' ? profile.isAutoSave : true;
@@ -1184,6 +1421,10 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
     };
 
     this.$.fix.onclick = async () => {
+        if (_isInLivePreviewMode) {
+            console.warn('[pTS Inspector] Fix is disabled in Live Preview Mode.');
+            return;
+        }
         if (!_currentAsset) return;
 
         console.groupCollapsed("[pTS Inspector] Fixing Asset: ", _currentAsset.displayName);
@@ -1308,7 +1549,16 @@ export function ready(this: PanelThis) {
         });
     }
     setupLazyToggle(this);
+
+    // Immediate refresh on click/focus when in preview mode
+    this.$this?.addEventListener('pointerdown', () => {
+        if (_isInLivePreviewMode) {
+            refreshLiveState(this);
+        }
+    });
 }
 
-export function close(this: PanelThis, ) {
-};
+export function close(this: PanelThis) {
+    stopPreviewPolling();
+    _isInLivePreviewMode = false;
+}

@@ -13,7 +13,7 @@ export abstract class pTSAsset_Data<_TType = any, _TOut = _TType> extends pTSAss
     abstract data: _TType;
 
     get() {
-        return this.data;
+        return this._clone(this.data);
     }
 
     set(value: _TType, force: boolean = false) {
@@ -21,8 +21,14 @@ export abstract class pTSAsset_Data<_TType = any, _TOut = _TType> extends pTSAss
         const _old = this._clone(this.data);
         this.data = value;
         this.emit('onChanged', value, _old);
-        console.log(`[x000] \t\t pTSAsset_Data_[${this.name}]: set >>> `, value);
     }
 
+    add(value: _TType) {
+        const _old = this._clone(this.data);
+        this.data = this._add(this.data, value);
+        this.emit('onChanged', this.data, _old);
+    }
+
+    protected abstract _add(old: _TType, value: _TType): _TType
     protected abstract _clone(value: _TType): _TOut
 }
