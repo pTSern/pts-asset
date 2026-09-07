@@ -1,6 +1,6 @@
-import { Asset, assetManager, Component, Node, js, director, Director, assert, RealCurve, Gradient, ColorKey, AlphaKey, Color } from "cc";
+import { Asset, assetManager, Component, Node, js, director, Director, assert, RealCurve, Gradient, ColorKey, AlphaKey, Color, AssetManager } from "cc";
 import { pTSAsset } from "db://pts-core/scripts/pTSAsset";
-import { pEngine } from "db://pts-core/scripts/utils";
+import { pEngine, pGlobal, pObject } from "db://pts-core/scripts/utils";
 import { loadLazyBundle, isLazyReady, lazyAssetsCache, shouldLoadLazy } from "../_$secret/_lazy-migration";
 
 const __seal_ = Symbol('__sealed_');
@@ -289,7 +289,20 @@ function _loadAssetByUuid(uuid: string, target?: any, propKey?: string): Promise
         // 3. Sub-assets (e.g. SpriteFrames or Textures with '@') NEVER have standalone files on disk in Cocos builds.
         // If they are not found in memory or _lazy bundle, NEVER call assetManager.loadAny — doing so triggers a 404!
         if (uuid.includes('@')) {
-            console.warn(`[pTSAsset] Sub-asset "${uuid}" not found in loaded assets or bundles.`);
+            if(!!target) {
+                console.log('[pTSAsset] Target is fine >> instant break', target);
+                return target;
+            }
+            const _downloader: AssetManager.Cache = assetManager.downloader['_downloading'];
+            const _msg: any[] = [`Loading UUID: `, uuid, "\t", target?.uuid, "\nTarget: ", target, "\nDownloader: ", _downloader, "\nMap: ", {...(_downloader['_map'])}];
+            if(!_downloader) {
+                _msg.push(`\n"${uuid}" not found in loaded assets or bundles.`);
+                pGlobal.group('ALL', { title: "[pTSAsset] Sub-asset", color: Color.YELLOW }, _msg)
+                return null;
+            }
+            _msg.push(`\nChecking Full: `, _downloader.has(uuid), "\nChecking Half: ",  _downloader.has(uuid.split('@')[0]));
+            pGlobal.group('ALL', { title: "[pTSAsset] Sub-asset" }, _msg)
+
             return null;
         }
 
