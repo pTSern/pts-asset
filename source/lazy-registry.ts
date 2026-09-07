@@ -97,12 +97,23 @@ export interface LazySyncReport {
     addedToLazy: Array<{ file?: string; uuid: string }>;
     skippedAlreadyReferenced: string[];
     deadPts: Array<{ file: string; uuid: string }>;
+    bundleMapEntries?: number;
 }
 
 /**
  * Ensures _$secret folder exists and is marked as an Asset Bundle.
  */
-function ensureSecretFolder(secretDir: string) {
+export interface DiscoveredBundle {
+    dirPath: string;
+    bundleName: string;
+    priority: number;
+}
+
+/**
+ * Ensures _$secret folder exists and is marked as an Asset Bundle with dynamic priority.
+ * Guaranteed to have higher priority than any host project bundle to prevent asset theft.
+ */
+function ensureSecretFolder(secretDir: string, dynamicPriority: number = 10) {
     if (!fs.existsSync(secretDir)) {
         fs.mkdirSync(secretDir, { recursive: true });
     }
@@ -118,7 +129,7 @@ function ensureSecretFolder(secretDir: string) {
         userData: {
             isBundle: true,
             bundleName: '_$secret',
-            priority: 1
+            priority: dynamicPriority
         }
     };
 
@@ -126,7 +137,9 @@ function ensureSecretFolder(secretDir: string) {
     if (fs.existsSync(folderMetaPath)) {
         try {
             const existing = JSON.parse(fs.readFileSync(folderMetaPath, 'utf8'));
-            if (existing?.userData?.isBundle === true && existing?.userData?.bundleName === '_$secret') {
+            if (existing?.userData?.isBundle === true &&
+                existing?.userData?.bundleName === '_$secret' &&
+                existing?.userData?.priority === dynamicPriority) {
                 needWrite = false;
             }
         } catch {}
@@ -134,6 +147,7 @@ function ensureSecretFolder(secretDir: string) {
 
     if (needWrite) {
         fs.writeFileSync(folderMetaPath, JSON.stringify(desiredMeta, null, 2), 'utf8');
+        console.log(`[pts-asset:lazy-registry] Updated _$secret.meta with dynamic priority: ${dynamicPriority}`);
     }
 }
 
@@ -150,8 +164,8 @@ interface AssetMetaInfo {
     importer?: string;
 }
 
-function findAssetBundles(assetsDir: string): string[] {
-    const bundleDirs: string[] = [];
+function findAssetBundles(assetsDir: string): DiscoveredBundle[] {
+    const bundles: DiscoveredBundle[] = [];
     function walk(dir: string) {
         if (!fs.existsSync(dir)) return;
         try {
@@ -165,7 +179,9 @@ function findAssetBundles(assetsDir: string): string[] {
                     try {
                         const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
                         if (meta?.userData?.isBundle === true && entry.name !== '_$secret') {
-                            bundleDirs.push(full);
+                            const bundleName = meta.userData.bundleName || entry.name;
+                            const priority = typeof meta.userData.priority === 'number' ? meta.userData.priority : 1;
+                            bundles.push({ dirPath: full, bundleName, priority });
                             continue;
                         }
                     } catch {}
@@ -175,7 +191,7 @@ function findAssetBundles(assetsDir: string): string[] {
         } catch {}
     }
     walk(assetsDir);
-    return bundleDirs;
+    return bundles;
 }
 
 function buildAssetUuidMap(assetsDir: string): Map<string, AssetMetaInfo> {
@@ -217,8 +233,13 @@ export function rescanAndSyncLazyPrefab(): LazySyncReport {
     const assetUuidMap = buildAssetUuidMap(assetsDir);
 
     // 2. Discover all asset bundles in assets/
-    const bundleDirs = findAssetBundles(assetsDir);
+    const discoveredBundles = findAssetBundles(assetsDir);
+    const bundleDirs = discoveredBundles.map(b => b.dirPath);
     const isInsideBundle = (filePath: string) => bundleDirs.some(b => filePath.startsWith(b));
+
+    // Calculate dynamic priority for _$secret (always higher than any host project bundle)
+    const maxProjectPriority = discoveredBundles.reduce((max, b) => Math.max(max, b.priority), 1);
+    const secretPriority = Math.max(maxProjectPriority + 5, 10);
 
     // 3. Scan and cache all .pts files in the project
     const allPtsFiles = findFilesByExt(assetsDir, '.pts');
@@ -287,20 +308,27 @@ export function rescanAndSyncLazyPrefab(): LazySyncReport {
     // - All .scene files
     // - All prefabs/scenes inside asset bundles (since Cocos bundles everything in bundle dirs)
     const liveBuildFiles = new Set<string>(findFilesByExt(assetsDir, '.scene'));
-    for (const b of bundleDirs) {
-        const bPrefabs = findFilesByExt(b, '.prefab').filter(f => !f.endsWith('_lazy.prefab'));
-        const bScenes = findFilesByExt(b, '.scene');
-        for (const f of [...bPrefabs, ...bScenes]) liveBuildFiles.add(f);
+    const fileToBundleMap = new Map<string, string>();
+
+    for (const b of discoveredBundles) {
+        const bPrefabs = findFilesByExt(b.dirPath, '.prefab').filter(f => !f.endsWith('_lazy.prefab'));
+        const bScenes = findFilesByExt(b.dirPath, '.scene');
+        for (const f of [...bPrefabs, ...bScenes]) {
+            liveBuildFiles.add(f);
+            fileToBundleMap.set(f, b.bundleName);
+        }
     }
 
     // 6. Transitive crawl through live build files to find true external references
     const externalRefs = new Set<string>();
+    const externalBundleOwners = new Map<string, string>();
     const uuidRegex = /"__uuid__":\s*"([^"]+)"/g;
     const visitedBuildFiles = new Set<string>(liveBuildFiles);
     const queueBuildFiles = Array.from(liveBuildFiles);
 
     while (queueBuildFiles.length > 0) {
         const file = queueBuildFiles.shift()!;
+        const ownerBundle = fileToBundleMap.get(file);
         try {
             const content = fs.readFileSync(file, 'utf8');
             let m: RegExpExecArray | null;
@@ -310,11 +338,19 @@ export function rescanAndSyncLazyPrefab(): LazySyncReport {
                 const baseUuid = refUuid.split('@')[0];
                 externalRefs.add(baseUuid);
 
+                if (ownerBundle) {
+                    externalBundleOwners.set(refUuid, ownerBundle);
+                    externalBundleOwners.set(baseUuid, ownerBundle);
+                }
+
                 // If ref is an external prefab outside bundles, crawl it too!
                 const pFile = prefabMap.get(baseUuid) || prefabMap.get(refUuid);
                 if (pFile && !visitedBuildFiles.has(pFile)) {
                     visitedBuildFiles.add(pFile);
                     queueBuildFiles.push(pFile);
+                    if (ownerBundle) {
+                        fileToBundleMap.set(pFile, ownerBundle);
+                    }
                 }
             }
         } catch {}
@@ -397,10 +433,10 @@ export function rescanAndSyncLazyPrefab(): LazySyncReport {
         }
     }
 
-    // 7. Write _lazy.prefab in _$secret bundle
+    // 7. Write _lazy.prefab in _$secret bundle with dynamic priority
     const extensionAssetsDir = path.resolve(__dirname, '../assets');
     const secretDir = path.join(extensionAssetsDir, '_$secret');
-    ensureSecretFolder(secretDir);
+    ensureSecretFolder(secretDir, secretPriority);
 
     const prefabPath = path.join(secretDir, '_lazy.prefab');
     const prefabMetaPath = path.join(secretDir, '_lazy.prefab.meta');
@@ -494,6 +530,55 @@ export function rescanAndSyncLazyPrefab(): LazySyncReport {
     };
     fs.writeFileSync(prefabMetaPath, JSON.stringify(prefabMeta, null, 2), 'utf8');
 
+    // 8. Generate dynamic bundle mapping for secondary bundle assets
+    const bundleMap: Record<string, string> = {};
+
+    // Map any asset physically inside a discovered bundle directory
+    for (const [uuid, metaInfo] of assetUuidMap.entries()) {
+        const normPath = path.normalize(metaInfo.path);
+        for (const b of discoveredBundles) {
+            const normBundle = path.normalize(b.dirPath);
+            if (normPath === normBundle || normPath.startsWith(normBundle + path.sep)) {
+                bundleMap[uuid] = b.bundleName;
+                break;
+            }
+        }
+    }
+
+    // Map external dependencies claimed by a bundle that are not protected in _lazy.prefab
+    for (const [uuid, bName] of externalBundleOwners.entries()) {
+        if (!bundleMap[uuid]) {
+            bundleMap[uuid] = bName;
+        }
+    }
+
+    // Ensure all needed dependencies in candidates have both base and sub-asset keys mapped
+    for (const candUuid of candidates) {
+        const baseUuid = candUuid.split('@')[0];
+        const bName = bundleMap[candUuid] || bundleMap[baseUuid];
+        if (bName) {
+            bundleMap[candUuid] = bName;
+            bundleMap[baseUuid] = bName;
+        }
+    }
+
+    const bundleMapPath = path.join(secretDir, 'pts-bundle-map.json');
+    const bundleMapMetaPath = path.join(secretDir, 'pts-bundle-map.json.meta');
+    fs.writeFileSync(bundleMapPath, JSON.stringify(bundleMap, null, 2), 'utf8');
+
+    if (!fs.existsSync(bundleMapMetaPath)) {
+        const bundleMapMeta = {
+            ver: '2.0.1',
+            importer: 'json',
+            imported: true,
+            uuid: 'b4de6b9a-1111-4444-8888-000000000001',
+            files: ['.json'],
+            subMetas: {},
+            userData: {}
+        };
+        fs.writeFileSync(bundleMapMetaPath, JSON.stringify(bundleMapMeta, null, 2), 'utf8');
+    }
+
     // Notify AssetDB
     if (typeof Editor !== 'undefined' && Editor.Message && Editor.Message.send) {
         try {
@@ -506,7 +591,8 @@ export function rescanAndSyncLazyPrefab(): LazySyncReport {
         liveRootPts,
         addedToLazy,
         skippedAlreadyReferenced,
-        deadPts
+        deadPts,
+        bundleMapEntries: Object.keys(bundleMap).length
     };
 
     console.group('[pts-asset:lazy-registry] Manual Re-Scan & Sync Report');
@@ -515,6 +601,7 @@ export function rescanAndSyncLazyPrefab(): LazySyncReport {
     console.log(`Added to _lazy.prefab (needed but no external ref): ${report.addedToLazy.length}`, report.addedToLazy.map(a => a.file || a.uuid));
     console.log(`Skipped (already referenced externally): ${report.skippedAlreadyReferenced.length}`);
     console.log(`Dead .pts (purged from _lazy.prefab): ${report.deadPts.length}`, report.deadPts.map(d => d.file));
+    console.log(`Dynamic Bundle Map: ${report.bundleMapEntries} entries mapped (secretPriority: ${secretPriority})`);
     console.groupEnd();
 
     return report;
