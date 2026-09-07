@@ -1,7 +1,8 @@
-import { Asset, assetManager, Component, Node, js, director, Director, assert, RealCurve, Gradient, ColorKey, AlphaKey, Color, AssetManager } from "cc";
+import { Asset, assetManager, Component, Node, js, director, Director, assert, RealCurve, Gradient, ColorKey, AlphaKey, Color, AssetManager, CCClass } from "cc";
+import { BUILD } from "cc/env";
 import { pTSAsset } from "db://pts-core/scripts/pTSAsset";
-import { pEngine, pGlobal, pObject } from "db://pts-core/scripts/utils";
-import { loadLazyBundle, isLazyReady, lazyAssetsCache, shouldLoadLazy } from "../_$secret/_lazy-migration";
+import { pEngine, pGlobal, pObject, pConst } from "db://pts-core/scripts/utils";
+import { loadLazyBundle, isLazyReady, lazyAssetsCache, bundleMapCache, shouldLoadLazy } from "../_$secret/_lazy-migration";
 
 const __seal_ = Symbol('__sealed_');
 const __hydrated_ = Symbol('__hydrated_');
@@ -58,6 +59,7 @@ interface PendingAssetRef {
     target: any;
     propKey: string;
     uuid: string;
+    bundleName?: string;
 }
 
 const _pendingAssetRefs: PendingAssetRef[] = [];
@@ -80,11 +82,12 @@ function _notifyBundleLoaded(bundle: any) {
 
             const decoded = (assetManager as any)?.utils?.decodeUuid ? (assetManager as any).utils.decodeUuid(ref.uuid) : null;
             const compressed = (assetManager as any)?.utils?.compressUuid ? (assetManager as any).utils.compressUuid(ref.uuid) : null;
-            const hasAsset = typeof bundle.getAssetInfo === 'function' && (
+            const matchesBundle = ref.bundleName && (ref.bundleName === bundle.name);
+            const hasAsset = matchesBundle || (typeof bundle.getAssetInfo === 'function' && (
                 bundle.getAssetInfo(ref.uuid) ||
                 (decoded && bundle.getAssetInfo(decoded)) ||
                 (compressed && bundle.getAssetInfo(compressed))
-            );
+            ));
 
             if (hasAsset) {
                 const targetRef = ref;
@@ -136,6 +139,50 @@ if (typeof assetManager !== 'undefined' && typeof assetManager.loadBundle === 'f
 
         return _origLoadBundle(name, ...args);
     };
+}
+
+const _bundleLoadPromises = new Map<string, Promise<any>>();
+
+function _loadBundleWithDeduplication(bundleName: string, timeoutMs: number = 10000): Promise<any> {
+    if (typeof assetManager === 'undefined' || typeof assetManager.loadBundle !== 'function') {
+        return Promise.resolve(null);
+    }
+
+    const existing = assetManager.bundles ? assetManager.bundles.get(bundleName) : null;
+    if (existing) return Promise.resolve(existing);
+
+    if (_bundleLoadPromises.has(bundleName)) {
+        return _bundleLoadPromises.get(bundleName)!;
+    }
+
+    const p = new Promise<any>((resolve) => {
+        let finished = false;
+        const timer = setTimeout(() => {
+            if (!finished) {
+                finished = true;
+                console.warn(`[pTSAsset] Timeout (${timeoutMs}ms) loading bundle "${bundleName}". Resolving gracefully.`);
+                resolve(null);
+            }
+        }, timeoutMs);
+
+        assetManager.loadBundle(bundleName, (err: any, bundle: any) => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timer);
+            if (err) {
+                console.warn(`[pTSAsset] Failed to load bundle "${bundleName}":`, err);
+                resolve(null);
+            } else {
+                resolve(bundle);
+            }
+        });
+    });
+
+    _bundleLoadPromises.set(bundleName, p);
+    p.finally(() => {
+        _bundleLoadPromises.delete(bundleName);
+    });
+    return p;
 }
 
 function _isUuidInAnyLoadedBundle(uuid: string): boolean {
@@ -286,41 +333,43 @@ function _loadAssetByUuid(uuid: string, target?: any, propKey?: string): Promise
             }
         }
 
-        // 3. Sub-assets (e.g. SpriteFrames or Textures with '@') NEVER have standalone files on disk in Cocos builds.
-        // If they are not found in memory or _lazy bundle, NEVER call assetManager.loadAny — doing so triggers a 404!
-        if (uuid.includes('@')) {
-            if(!!target) {
-                console.log('[pTSAsset] Target is fine >> instant break', target);
-                return target;
-            }
-            const _downloader: AssetManager.Cache = assetManager.downloader['_downloading'];
-            const _msg: any[] = [`Loading UUID: `, uuid, "\t", target?.uuid, "\nTarget: ", target, "\nDownloader: ", _downloader, "\nMap: ", {...(_downloader['_map'])}];
-            if(!_downloader) {
-                _msg.push(`\n"${uuid}" not found in loaded assets or bundles.`);
-                pGlobal.group('ALL', { title: "[pTSAsset] Sub-asset", color: Color.YELLOW }, _msg)
-                return null;
-            }
-            _msg.push(`\nChecking Full: `, _downloader.has(uuid), "\nChecking Half: ",  _downloader.has(uuid.split('@')[0]));
-            pGlobal.group('ALL', { title: "[pTSAsset] Sub-asset" }, _msg)
-
+        // 3. Sub-assets without known bundle: avoid root 404
+        const owningBundle = bundleMapCache.get(uuid) || bundleMapCache.get(uuid.split('@')[0]);
+        if (uuid.includes('@') && !owningBundle && !_isUuidInAnyLoadedBundle(uuid)) {
             return null;
         }
 
-        // 4. Standalone assets: Check if any currently loaded bundle knows about this UUID.
-        // In Cocos Creator builds, assets in bundles only exist within their bundle's path.
-        // If no currently loaded bundle knows about this UUID, calling loadAny({ uuid })
-        // will cause Cocos to request /<uuid>.json which 404s!
+        // 4. Ensure dynamic property getter is active for synchronous access
+        if (target && propKey) {
+            _setupAssetLazyGetter(target, propKey, uuid);
+        }
+
+        // 5. If asset belongs to another bundle, load that bundle on-demand if not loaded yet
+        if (owningBundle && owningBundle !== '_$secret') {
+            let bundle = assetManager.bundles ? assetManager.bundles.get(owningBundle) : null;
+            if (!bundle) {
+                if (target && propKey) {
+                    _pendingAssetRefs.push({ target, propKey, uuid, bundleName: owningBundle });
+                }
+                console.log(`[pTSAsset] Asset "${uuid}" belongs to bundle "${owningBundle}". Triggering bundle load...`);
+                bundle = await _loadBundleWithDeduplication(owningBundle);
+                if (!bundle) {
+                    console.warn(`[pTSAsset] Bundle "${owningBundle}" could not be loaded for asset "${uuid}".`);
+                    return null;
+                }
+            }
+        }
+
         const canLoadDirectly = _isUuidInAnyLoadedBundle(uuid);
-        if (!canLoadDirectly) {
-            // Register as pending asset reference so when its bundle loads later, it gets populated
+        if (!canLoadDirectly && !owningBundle) {
             if (target && propKey) {
                 _pendingAssetRefs.push({ target, propKey, uuid });
             }
-            console.warn(`[pTSAsset] Dependency asset "${uuid}" belongs to a bundle that is not loaded yet. Deferred until bundle loads.`);
+            console.warn(`[pTSAsset] Dependency asset "${uuid}" belongs to an unknown/unloaded bundle. Deferred.`);
             return null;
         }
 
-        // 5. If a loaded bundle knows this UUID, call assetManager.loadAny
+        // 6. If bundle is loaded (or _$secret/root), call assetManager.loadAny
         return new Promise<Asset | null>((resolve) => {
             if (typeof assetManager === 'undefined' || typeof assetManager.loadAny !== 'function') {
                 console.warn(`[pTSAsset] assetManager.loadAny not available to load dependency ${uuid}`);
@@ -330,7 +379,8 @@ function _loadAssetByUuid(uuid: string, target?: any, propKey?: string): Promise
 
             _visitingUuids.add(uuid);
 
-            assetManager.loadAny({ uuid }, (err: any, loadedAsset: any) => {
+            const loadOptions = owningBundle ? { uuid, bundle: owningBundle } : { uuid };
+            assetManager.loadAny(loadOptions, (err: any, loadedAsset: any) => {
                 _visitingUuids.delete(uuid);
 
                 if (err) {
@@ -789,6 +839,28 @@ function _hydrate(asset: Asset, ptsJson: any): void {
 
     // Apply immediately so properties are available before Component onLoad/start!
     _applyProperties();
+
+    // Register live asset instance for Editor Preview Mode
+    if (!BUILD && pConst.EDITOR_ONLY_IN_PREVIEW) {
+        const rawUuid = (asset as any)._uuid || asset.uuid;
+        if (rawUuid) {
+            globalThis['__pTS_LIVE_ASSETS__'] = globalThis['__pTS_LIVE_ASSETS__'] || new Map<string, any>();
+            globalThis['__pTS_LIVE_ASSETS__'].set(rawUuid, asset);
+            try {
+                const utils = (assetManager as any)?.utils;
+                if (utils) {
+                    if (typeof utils.decodeUuid === 'function') {
+                        const dec = utils.decodeUuid(rawUuid);
+                        if (dec) globalThis['__pTS_LIVE_ASSETS__'].set(dec, asset);
+                    }
+                    if (typeof utils.compressUuid === 'function') {
+                        const comp = utils.compressUuid(rawUuid);
+                        if (comp) globalThis['__pTS_LIVE_ASSETS__'].set(comp, asset);
+                    }
+                }
+            } catch {}
+        }
+    }
 }
 
 // ─── 8. Pipeline Hook: Intercept Loaded Assets (.pts native or embedded json) ───
