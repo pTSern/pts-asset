@@ -159,7 +159,59 @@ export const methods: { [key: string]: (...any: any) => any } = {
         }
     },
 
+    syncPreviewData(data: Record<string, any>) {
+        _lastPreviewHeartbeat = Date.now();
+        if (data && typeof data === 'object') {
+            _livePreviewData = data;
+        }
+    },
+
+    queryPreviewData(uuid: string, typeName?: string, assetName?: string) {
+        const isLive = (Date.now() - _lastPreviewHeartbeat) < 2500;
+        if (!isLive || !_livePreviewData) {
+            return { isPreview: false };
+        }
+
+        let foundItem: any = _livePreviewData[uuid];
+        if (!foundItem && assetName) {
+            foundItem = _livePreviewData[assetName];
+        }
+        if (!foundItem && typeName) {
+            foundItem = _livePreviewData[typeName];
+        }
+        if (!foundItem) {
+            for (const k of Object.keys(_livePreviewData)) {
+                const it = _livePreviewData[k];
+                if (it && (
+                    it.uuid === uuid ||
+                    it._uuid === uuid ||
+                    (assetName && it.name === assetName) ||
+                    (typeName && it.name === typeName)
+                )) {
+                    foundItem = it;
+                    break;
+                }
+            }
+        }
+
+        if (foundItem) {
+            return {
+                isPreview: true,
+                found: true,
+                values: foundItem.values || foundItem
+            };
+        }
+
+        return {
+            isPreview: true,
+            found: false
+        };
+    },
+
 };
+
+let _livePreviewData: Record<string, any> | null = null;
+let _lastPreviewHeartbeat = 0;
 
 /**
  * Patch the library .json for a .pts asset so the runtime deserializer

@@ -714,6 +714,16 @@ function _resolveValue(val: any, expectedCtor?: any, target?: any, propKey?: str
 }
 
 // ─── 7. Hydrate Asset ───
+function _getPropDescriptor(target: any, key: string): PropertyDescriptor | undefined {
+    let curr = target;
+    while (curr && curr !== Object.prototype) {
+        const desc = Object.getOwnPropertyDescriptor(curr, key);
+        if (desc) return desc;
+        curr = Object.getPrototypeOf(curr);
+    }
+    return undefined;
+}
+
 function _hydrate(asset: Asset, ptsJson: any): void {
     if (!asset || !ptsJson) return;
     if ((asset as any)[__hydrated_]) return;
@@ -743,6 +753,8 @@ function _hydrate(asset: Asset, ptsJson: any): void {
     try {
         dummy = new targetClass();
         for (const prop of Object.getOwnPropertyNames(dummy)) {
+            const desc = _getPropDescriptor(asset, prop);
+            if (desc && desc.get && !desc.set) continue;
             if (!(prop in asset) || (asset as any)[prop] === undefined) {
                 (asset as any)[prop] = dummy[prop];
             }
@@ -761,15 +773,25 @@ function _hydrate(asset: Asset, ptsJson: any): void {
                     const propDef = _props[_key];
                     const propCtor = propDef?.ctor;
 
+                    const desc = _getPropDescriptor(asset, _key);
+                    const hasGetter = Boolean(desc && typeof desc.get === 'function');
+                    const hasSetter = Boolean(desc && typeof desc.set === 'function');
+                    const isGetterOnly = hasGetter && !hasSetter;
+                    const isSetterOnly = !hasGetter && hasSetter;
+
+                    const safeIsArray = (fn: () => any) => {
+                        try { return Array.isArray(fn()); } catch { return false; }
+                    };
+
                     const isArray = Array.isArray(__value__?.[_key])
-                        || (dummy && Array.isArray(dummy[_key]))
-                        || Array.isArray((asset as any)[_key])
+                        || (dummy && !isSetterOnly && safeIsArray(() => dummy[_key]))
+                        || (!isSetterOnly && safeIsArray(() => (asset as any)[_key]))
                         || Array.isArray(propDef?.type)
                         || Array.isArray(propDef?.ctor)
                         || propDef?.type === (Array as any)
                         || propDef?.ctor === (Array as any)
                         || Array.isArray(propDef?.default)
-                        || (typeof propDef?.default === 'function' && Array.isArray(propDef.default()));
+                        || (typeof propDef?.default === 'function' && safeIsArray(() => propDef.default()));
 
                     const candidates = [
                         propCtor,
@@ -780,17 +802,71 @@ function _hydrate(asset: Asset, ptsJson: any): void {
                     const isNodeOrComp = candidates.some(c => typeof c === 'function' && (js.isChildClassOf(c, Component) || js.isChildClassOf(c, Node)));
 
                     if (isNodeOrComp) {
-                        (asset as any)[_key] = isArray ? [] : null;
+                        if (isGetterOnly) {
+                            const backingKey = '_' + _key;
+                            if (backingKey in asset) {
+                                (asset as any)[backingKey] = isArray ? [] : null;
+                            }
+                        } else {
+                            (asset as any)[_key] = isArray ? [] : null;
+                        }
                         continue;
                     }
 
                     if (!(_key in __value__)) {
                         const _default = propDef?.default;
-                        const defaultVal = typeof _default === 'function' ? _default() : _default;
+                        let defaultVal: any = undefined;
+                        try {
+                            defaultVal = typeof _default === 'function' ? _default() : _default;
+                        } catch {}
+
+                        if (isGetterOnly) {
+                            // Getter-only: NEVER write to asset[_key] (throws TypeError in strict mode)
+                            const backingKey = '_' + _key;
+                            if (backingKey in asset) {
+                                if (defaultVal !== undefined) {
+                                    (asset as any)[backingKey] = defaultVal;
+                                } else if (dummy && (backingKey in dummy) && dummy[backingKey] !== undefined) {
+                                    (asset as any)[backingKey] = dummy[backingKey];
+                                }
+                                if (isArray && ((asset as any)[backingKey] === undefined || (asset as any)[backingKey] === null)) {
+                                    (asset as any)[backingKey] = [];
+                                }
+                            }
+                            // Pure computed getter without backing field: do not write
+                            continue;
+                        }
+
+                        if (isSetterOnly) {
+                            // Setter-only: CAN write to asset[_key], but CANNOT read asset[_key] or dummy[_key]
+                            let hasAssigned = false;
+                            if (defaultVal !== undefined) {
+                                (asset as any)[_key] = defaultVal;
+                                hasAssigned = true;
+                            } else {
+                                const backingKey = '_' + _key;
+                                if (dummy && (backingKey in dummy) && dummy[backingKey] !== undefined) {
+                                    (asset as any)[_key] = dummy[backingKey];
+                                    hasAssigned = true;
+                                }
+                            }
+                            if (isArray && !hasAssigned) {
+                                (asset as any)[_key] = [];
+                            }
+                            continue;
+                        }
+
+                        // Normal property or getter+setter
                         if (defaultVal !== undefined) {
                             (asset as any)[_key] = defaultVal;
-                        } else if (dummy && dummy[_key] !== undefined) {
-                            (asset as any)[_key] = dummy[_key];
+                        } else if (dummy) {
+                            let dummyVal: any = undefined;
+                            try {
+                                dummyVal = dummy[_key];
+                            } catch {}
+                            if (dummyVal !== undefined) {
+                                (asset as any)[_key] = dummyVal;
+                            }
                         }
                         if (isArray && ((asset as any)[_key] === undefined || (asset as any)[_key] === null)) {
                             (asset as any)[_key] = [];
@@ -799,9 +875,28 @@ function _hydrate(asset: Asset, ptsJson: any): void {
                     }
 
                     const rawVal = __value__[_key];
-                    (asset as any)[_key] = _resolveValue(rawVal, propCtor, asset, _key, depsPromises);
-                    if (isArray && ((asset as any)[_key] === undefined || (asset as any)[_key] === null)) {
-                        (asset as any)[_key] = [];
+                    if (isGetterOnly) {
+                        // Getter-only: assign to backing field if it exists, otherwise skip
+                        const backingKey = '_' + _key;
+                        if (backingKey in asset) {
+                            const resolved = _resolveValue(rawVal, propCtor, asset, backingKey, depsPromises);
+                            (asset as any)[backingKey] = resolved;
+                            if (isArray && ((asset as any)[backingKey] === undefined || (asset as any)[backingKey] === null)) {
+                                (asset as any)[backingKey] = [];
+                            }
+                        }
+                    } else if (isSetterOnly) {
+                        // Setter-only: assign to asset[_key], but do NOT read asset[_key] afterwards
+                        let resolved = _resolveValue(rawVal, propCtor, asset, _key, depsPromises);
+                        if (isArray && (resolved === undefined || resolved === null)) {
+                            resolved = [];
+                        }
+                        (asset as any)[_key] = resolved;
+                    } else {
+                        (asset as any)[_key] = _resolveValue(rawVal, propCtor, asset, _key, depsPromises);
+                        if (isArray && ((asset as any)[_key] === undefined || (asset as any)[_key] === null)) {
+                            (asset as any)[_key] = [];
+                        }
                     }
                 }
             }
@@ -809,6 +904,15 @@ function _hydrate(asset: Asset, ptsJson: any): void {
             // Apply any remaining values in __value__ not in _props
             for (const _key in __value__) {
                 if (!_props || !(_key in _props)) {
+                    const desc = _getPropDescriptor(asset, _key);
+                    const isGetterOnly = Boolean(desc && typeof desc.get === 'function' && !desc.set);
+                    if (isGetterOnly) {
+                        const backingKey = '_' + _key;
+                        if (backingKey in asset) {
+                            (asset as any)[backingKey] = _resolveValue(__value__[_key], undefined, asset, backingKey, depsPromises);
+                        }
+                        continue;
+                    }
                     (asset as any)[_key] = _resolveValue(__value__[_key], undefined, asset, _key, depsPromises);
                 }
             }
@@ -817,6 +921,9 @@ function _hydrate(asset: Asset, ptsJson: any): void {
             if (dummy) {
                 for (const prop of Object.getOwnPropertyNames(dummy)) {
                     if (Array.isArray(dummy[prop])) {
+                        const desc = _getPropDescriptor(asset, prop);
+                        if (desc && desc.get && !desc.set) continue;
+                        if (desc && !desc.get && desc.set) continue;
                         if (!(prop in asset) || (asset as any)[prop] === null || (asset as any)[prop] === undefined) {
                             (asset as any)[prop] = [];
                         }
