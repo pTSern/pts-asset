@@ -188,6 +188,16 @@
                     "pts_updater"
                 ]
             },
+            "scene:ready": {
+                "methods": [
+                    "onSceneReady"
+                ]
+            },
+            "asset-db:asset-add": {
+                "methods": [
+                    "onAssetChanged"
+                ]
+            },
             "asset-db:asset-change": {
                 "methods": [
                     "onAssetChanged"

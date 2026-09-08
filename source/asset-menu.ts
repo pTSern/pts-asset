@@ -2,6 +2,8 @@ import fs from 'fs';
 import path from 'path';
 import pkg from '../package.json';
 import { collectValuesFromDump, extractAssetDependencies } from './pts';
+import { getExtendsChain } from './inheritance';
+import { setCachedPtsType } from './main';
 
 declare const Editor: any;
 
@@ -385,6 +387,19 @@ export async function createAndInitPtsAsset(assetInfo: MenuAssetInfo | undefined
                 delete meta.userData.depends;
                 await Editor.Message.request('asset-db', 'save-asset-meta', finalAsset.uuid, JSON.stringify(meta));
                 console.log(`[pts-asset] Meta initialized with __type__ = "${className}", __depends__ =`, depends);
+
+                try {
+                    const extChain = getExtendsChain(className);
+                    const typeInfo = {
+                        type: className,
+                        extends: extChain,
+                        depends: depends
+                    };
+                    setCachedPtsType(finalAsset.uuid, typeInfo);
+                    if (finalAsset.file) {
+                        setCachedPtsType(finalAsset.file, typeInfo);
+                    }
+                } catch {}
             }
         } catch (metaErr) {
             console.error('[pts-asset] Failed to update meta for new asset:', metaErr);

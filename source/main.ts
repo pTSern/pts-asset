@@ -3,7 +3,7 @@ import pkg from '../package.json'
 import path from 'path'
 
 import { AssetInfo, IAssetMeta } from '@cocos/creator-types/editor/packages/asset-db/@types/public'
-import { getExtendsChain, setRuntimeInheritanceChains, clearInheritanceCache } from './inheritance'
+import { getExtendsChain, setRuntimeInheritanceChains, clearInheritanceCache, scanSingleFile, scanInheritance } from './inheritance'
 import { rescanAndSyncLazyPrefab } from './lazy-registry'
 
 function openUrl(url: string) {
@@ -136,17 +136,59 @@ export const methods: { [key: string]: (...any: any) => any } = {
     },
 
     /**
-     * Called by asset-db:asset-change message.
-     * Automatically patches .pts library JSON when assets are imported/changed.
+     * Called when Cocos Creator finishes compiling scripts and the scene VM is ready.
+     * Refreshes runtime inheritance chains and clears all caches.
+     */
+    async onSceneReady() {
+        console.log('[pts-asset] Scene ready: refreshing inheritance chains and clearing cache');
+        clearInheritanceCache();
+        _ptsTypeCache.clear();
+        try {
+            const chains = await Editor.Message.request('scene', 'execute-scene-script', {
+                name: 'pts-core',
+                method: 'get_all_pts_inheritance_chains',
+                args: []
+            });
+            if (chains && typeof chains === 'object') {
+                setRuntimeInheritanceChains(chains);
+                console.log(`[pts-asset] Runtime inheritance chains refreshed: ${Object.keys(chains).length} classes`);
+            }
+        } catch (e) {}
+    },
+
+    /**
+     * Called by asset-db:asset-change and asset-db:asset-add messages.
+     * Automatically patches .pts library JSON when assets are imported/changed,
+     * and refreshes inheritance cache when TypeScript scripts are added or modified.
      */
     async onAssetChanged(uuid: string) {
         if (!uuid) return;
         try {
             const data = await Editor.Message.request('asset-db', 'query-asset-info', uuid);
             if (!data) return;
-            // Invalidate cache
+            // Invalidate cache for this asset
             _ptsTypeCache.delete(uuid);
             if (data.file) _ptsTypeCache.delete(data.file);
+
+            // If a script (.ts) was added/changed, rescan inheritance immediately!
+            if (data.file && data.file.endsWith('.ts') && !data.file.endsWith('.d.ts')) {
+                console.log(`[pts-asset] TypeScript asset changed (${data.file}), refreshing inheritance...`);
+                scanSingleFile(data.file);
+                _ptsTypeCache.clear();
+                try {
+                    Editor.Message.request('scene', 'execute-scene-script', {
+                        name: 'pts-core',
+                        method: 'get_all_pts_inheritance_chains',
+                        args: []
+                    }).then((chains: any) => {
+                        if (chains && typeof chains === 'object') {
+                            setRuntimeInheritanceChains(chains);
+                        }
+                    }).catch(() => {});
+                } catch {}
+                return;
+            }
+
             // Only process .pts files
             if (!data.file || !data.file.endsWith('.pts')) return;
 
@@ -405,9 +447,10 @@ export function getPtsTypeInfo(filePathOrUuid: string): { type: string, extends:
         }
 
         if (targetType) {
+            const extChain = getExtendsChain(targetType);
             const typeInfo = {
                 type: targetType,
-                extends: getExtendsChain(targetType),
+                extends: extChain,
                 depends
             };
             _ptsTypeCache.set(filePathOrUuid, typeInfo);
@@ -419,19 +462,38 @@ export function getPtsTypeInfo(filePathOrUuid: string): { type: string, extends:
     return null;
 }
 
+export function setCachedPtsType(key: string, info: { type: string, extends: string[], depends: string[] }): void {
+    if (!key || !info) return;
+    _ptsTypeCache.set(key, info);
+}
+
+export function invalidatePtsCache(key?: string): void {
+    if (key) {
+        _ptsTypeCache.delete(key);
+    } else {
+        _ptsTypeCache.clear();
+    }
+}
+
 function _enrichPtsAssetInfo(info: any) {
     if (!info) return;
     const file = info.file || info.path;
     if (!file || typeof file !== 'string' || !file.endsWith('.pts')) return;
 
-    const typeInfo = getPtsTypeInfo(info.file || file);
-    console.log(`[pts-asset] Enriching asset info for ${file}:`, typeInfo);
+    let typeInfo = getPtsTypeInfo(file);
+    if (!typeInfo && info.uuid) {
+        typeInfo = getPtsTypeInfo(info.uuid);
+    }
     if (typeInfo) {
         info.type = typeInfo.type;
         info.extends = typeInfo.extends;
         if (typeInfo.depends && typeInfo.depends.length > 0) {
             const existing = Array.isArray(info.depends) ? info.depends : [];
             info.depends = Array.from(new Set([...existing, ...typeInfo.depends]));
+        }
+        _ptsTypeCache.set(file, typeInfo);
+        if (info.uuid) {
+            _ptsTypeCache.set(info.uuid, typeInfo);
         }
     }
 }
