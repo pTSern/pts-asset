@@ -1,6 +1,6 @@
 import { _decorator, director, Director, assetManager, Prefab, instantiate, Asset, Node, JsonAsset } from 'cc';
 import { BUILD } from 'cc/env';
-import { pConst } from 'db://pts-core/scripts/utils';
+import * as pConst from 'db://pts-core/scripts/utils/pConst';
 
 export const lazyAssetsCache = new Map<string, Asset>();
 export const bundleMapCache = new Map<string, string>();
@@ -178,13 +178,18 @@ export function loadLazyBundle(): Promise<Prefab | null> {
     return _lazyPromise;
 }
 
-// Auto-start loading in Preview or Build mode immediately
-if (shouldLoadLazy()) {
-    loadLazyBundle()
+function _initLazyAutoLoad(): void {
+    if (!shouldLoadLazy()) return;
+
+    if (director.getScene()) {
+        loadLazyBundle();
+    } else {
+        director.once(Director.EVENT_AFTER_SCENE_LAUNCH, () => {
+            if (shouldLoadLazy()) {
+                loadLazyBundle();
+            }
+        });
+    }
 }
 
-director.once(Director.EVENT_BEFORE_SCENE_LAUNCH, () => {
-    if (shouldLoadLazy()) {
-        loadLazyBundle();
-    }
-});
+_initLazyAutoLoad();

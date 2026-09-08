@@ -1,7 +1,10 @@
 import { Asset, assetManager, Component, Node, js, director, Director, assert, RealCurve, Gradient, ColorKey, AlphaKey, Color, AssetManager, CCClass } from "cc";
 import { BUILD } from "cc/env";
 import { pTSAsset } from "db://pts-core/scripts/pTSAsset";
-import { pEngine, pGlobal, pObject, pConst } from "db://pts-core/scripts/utils";
+import * as pEngine from "db://pts-core/scripts/utils/pEngine";
+import * as pGlobal from "db://pts-core/scripts/utils/pGlobal";
+import * as pObject from "db://pts-core/scripts/utils/pObject";
+import * as pConst from "db://pts-core/scripts/utils/pConst";
 import { loadLazyBundle, isLazyReady, lazyAssetsCache, bundleMapCache, shouldLoadLazy } from "../_$secret/_lazy-migration";
 
 const __seal_ = Symbol('__sealed_');
