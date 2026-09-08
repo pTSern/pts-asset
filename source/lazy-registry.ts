@@ -61,6 +61,37 @@ function findFilesByExt(dir: string, ext: string, out: string[] = []): string[] 
     return out;
 }
 
+export function cleanOrphanMetas(targetDir: string): string[] {
+    const removed: string[] = [];
+    function scan(dir: string) {
+        if (!fs.existsSync(dir)) return;
+        try {
+            const entries = fs.readdirSync(dir, { withFileTypes: true });
+            for (const entry of entries) {
+                const full = path.join(dir, entry.name);
+                if (entry.isDirectory()) {
+                    if (entry.name !== 'node_modules' && entry.name !== '.git' && entry.name !== 'temp' && entry.name !== 'library' && entry.name !== 'build') {
+                        scan(full);
+                    }
+                } else if (entry.name.endsWith('.meta')) {
+                    const target = full.slice(0, -5);
+                    if (!fs.existsSync(target)) {
+                        try {
+                            fs.unlinkSync(full);
+                            removed.push(full);
+                        } catch {}
+                    }
+                }
+            }
+        } catch {}
+    }
+    scan(targetDir);
+    if (removed.length > 0) {
+        console.warn(`[pts-asset:lazy-registry] Auto-cleaned ${removed.length} orphan .meta file(s):`, removed);
+    }
+    return removed;
+}
+
 function extractAssetDependencies(val: any, out: Set<string> = new Set()): string[] {
     if (!val || typeof val !== 'object') return Array.from(out);
 
@@ -228,6 +259,9 @@ function buildAssetUuidMap(assetsDir: string): Map<string, AssetMetaInfo> {
 export function rescanAndSyncLazyPrefab(): LazySyncReport {
     const projectPath = getProjectPath();
     const assetsDir = path.join(projectPath, 'assets');
+
+    // 0. Auto-clean any orphan .meta files (e.g. deleted folders left behind)
+    cleanOrphanMetas(assetsDir);
 
     // 1. Build UUID map of all assets and sub-assets in project
     const assetUuidMap = buildAssetUuidMap(assetsDir);

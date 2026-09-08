@@ -794,6 +794,7 @@ function _hydrate(asset: Asset, ptsJson: any): void {
                         || propDef?.type === (Array as any)
                         || propDef?.ctor === (Array as any)
                         || Array.isArray(propDef?.default)
+                        //@ts-ignore
                         || (typeof propDef?.default === 'function' && safeIsArray(() => propDef.default()));
 
                     const candidates = [

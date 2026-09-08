@@ -1133,6 +1133,73 @@ function setupLazyToggle(panel: PanelThis) {
     panel.$.lazyToggle.addEventListener('confirm', onLazyToggleChanged);
 }
 
+function findAssetElement(path: any[]): HTMLElement | null {
+    if (!Array.isArray(path)) return null;
+    for (const node of path) {
+        if (!node || !node.tagName) continue;
+        const tag = node.tagName.toUpperCase();
+        if (tag === 'UI-ASSET' || tag === 'CC-ASSET') return node;
+        if (node.classList && (node.classList.contains('cc-asset') || node.classList.contains('ui-asset') || node.classList.contains('pts-asset'))) return node;
+        if (node.getAttribute && (node.getAttribute('type') === 'cc.Asset' || node.getAttribute('droppable') === 'cc.Asset')) return node;
+        const dump = node.dump;
+        if (dump && isAssetType(dump)) return node;
+    }
+    return null;
+}
+
+function findEnumElement(path: any[]): HTMLElement | null {
+    if (!Array.isArray(path)) return null;
+    for (const node of path) {
+        if (!node || !node.tagName) continue;
+        const tag = node.tagName.toUpperCase();
+        if (tag === 'UI-SELECT' || tag === 'UI-SELECT-PRO' || tag === 'SELECT') return node;
+        if (node.classList && (node.classList.contains('ui-select') || node.classList.contains('cc-enum') || node.classList.contains('enum'))) return node;
+        const dump = node.dump;
+        if (dump && (dump.type === 'Enum' || dump.type === 'cc.Enum')) return node;
+    }
+    return null;
+}
+
+function findBooleanElement(path: any[]): HTMLElement | null {
+    if (!Array.isArray(path)) return null;
+    for (const node of path) {
+        if (!node || !node.tagName) continue;
+        const tag = node.tagName.toUpperCase();
+        if (tag === 'UI-CHECKBOX' || (tag === 'INPUT' && (node as HTMLInputElement).type === 'checkbox')) return node;
+        if (node.classList && (node.classList.contains('ui-checkbox') || node.classList.contains('cc-checkbox'))) return node;
+        const dump = node.dump;
+        if (dump && dump.type === 'Boolean') return node;
+    }
+    return null;
+}
+
+function isPrimaryInput(path: any[]): boolean {
+    if (!Array.isArray(path)) return false;
+    if (findAssetElement(path) || findEnumElement(path) || findBooleanElement(path)) {
+        return false;
+    }
+    for (const node of path) {
+        if (!node || !node.tagName) continue;
+        const tag = node.tagName.toUpperCase();
+        if (tag === 'UI-INPUT' || tag === 'UI-NUM-INPUT' || tag === 'UI-SLIDER' || tag === 'INPUT' || tag === 'TEXTAREA') {
+            return true;
+        }
+        if (tag === 'UI-PROP' || tag === 'CC-PROP') {
+            const dump = node.dump;
+            if (dump && (dump.type === 'String' || dump.type === 'Number' || dump.type === 'Float' || dump.type === 'Integer')) {
+                return true;
+            }
+        }
+        if (node.classList && (node.classList.contains('cc-prop') || node.classList.contains('pts-basic-prop') || node.classList.contains('pts-array-item'))) {
+            const dump = node.dump;
+            if (dump && (dump.type === 'String' || dump.type === 'Number' || dump.type === 'Float' || dump.type === 'Integer')) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 export async function update(this: PanelThis, assetList: AssetInfo[], metaList: Meta[]) {
     this.assetList = assetList;
     this.metaList = metaList;
@@ -1372,36 +1439,116 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
 
     _currentTriggerAutoSave = triggerAutoSave;
 
-    // Attach capture-phase listeners on view once to intercept all input/change/confirm/drop events
+    // Attach capture-phase listeners on view once to intercept all change/confirm/keydown/drop events
     if (!this.$.view.__pts_captured__) {
         this.$.view.__pts_captured__ = true;
 
-        const onUserAction = (e: Event) => {
-            const path = e.composedPath ? e.composedPath() : [e.target];
-            const uiAsset = path.find((node: any) => node && node.tagName === 'UI-ASSET') as HTMLElement;
-            if (uiAsset) {
-                console.log(`[pTS Inspector] Capture event (${e.type}) on <ui-asset>, value:`, (uiAsset as any).value);
-                syncUiAssetToDump(uiAsset, _lastDump);
-            }
-            if (_currentTriggerAutoSave) _currentTriggerAutoSave();
-        };
-
+        // 1. CHANGE event:
+        // Asset (cc-asset / ui-asset): sync dump and save immediately.
+        // Enum field: save immediately.
+        // Boolean: save immediately.
+        // Primary (cc-prop / ui-prop / ui-input / ui-num-input): SUPPRESSED! Only save on Enter key.
         this.$.view.addEventListener('change', (e: any) => {
+            const path = e.composedPath ? e.composedPath() : [e.target];
+
+            // Array resize (.pts-array-size)
             if (e.target && e.target.classList && e.target.classList.contains('pts-array-size')) {
                 handleArrayResize(e.target, () => {
                     if (_currentTriggerAutoSave) _currentTriggerAutoSave();
                 });
+                return;
             }
-            onUserAction(e);
+
+            // Asset change: save immediately
+            const assetEl = findAssetElement(path);
+            if (assetEl) {
+                console.log(`[pTS Inspector] Asset change detected on <${assetEl.tagName}>`);
+                const uiAsset = (assetEl.tagName === 'UI-ASSET' ? assetEl : assetEl.querySelector('ui-asset')) as HTMLElement || assetEl;
+                syncUiAssetToDump(uiAsset, _lastDump);
+                if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                return;
+            }
+
+            // Enum change: save immediately
+            const enumEl = findEnumElement(path);
+            if (enumEl) {
+                console.log(`[pTS Inspector] Enum change detected on <${enumEl.tagName}>`);
+                if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                return;
+            }
+
+            // Boolean toggle: save immediately
+            const boolEl = findBooleanElement(path);
+            if (boolEl) {
+                console.log(`[pTS Inspector] Boolean toggle detected on <${boolEl.tagName}>`);
+                if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                return;
+            }
+
+            // Primary property (cc-prop / ui-input / ui-num-input):
+            // Rule: "if the target value changed is primary ( cc-prop ), then only save if user hit enter"
+            if (isPrimaryInput(path)) {
+                console.log(`[pTS Inspector] Primary property change event ignored (requires Enter key to save).`);
+                return;
+            }
+
+            // Fallback for any other non-primary controls
+            if (_currentTriggerAutoSave) _currentTriggerAutoSave();
         }, true);
 
-        this.$.view.addEventListener('confirm', onUserAction, true);
-        this.$.view.addEventListener('input', onUserAction, true);
+        // 2. CONFIRM event:
+        // Fired on Enter in ui-input / ui-num-input, or selection in ui-select / ui-checkbox / ui-asset
+        this.$.view.addEventListener('confirm', (e: any) => {
+            const path = e.composedPath ? e.composedPath() : [e.target];
+
+            if (e.target && e.target.classList && e.target.classList.contains('pts-array-size')) {
+                handleArrayResize(e.target, () => {
+                    if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                });
+                return;
+            }
+
+            const assetEl = findAssetElement(path);
+            if (assetEl) {
+                const uiAsset = (assetEl.tagName === 'UI-ASSET' ? assetEl : assetEl.querySelector('ui-asset')) as HTMLElement || assetEl;
+                syncUiAssetToDump(uiAsset, _lastDump);
+            }
+
+            console.log(`[pTS Inspector] Confirm event (Enter/select) -> triggering auto-save.`);
+            if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+        }, true);
+
+        // 3. KEYDOWN event:
+        // Ensures Enter keypress triggers save for primary inputs even before blur
+        this.$.view.addEventListener('keydown', (e: KeyboardEvent) => {
+            if (e.key === 'Enter') {
+                const path = e.composedPath ? e.composedPath() : [e.target];
+                if (e.target && (e.target as HTMLElement).classList && (e.target as HTMLElement).classList.contains('pts-array-size')) {
+                    handleArrayResize(e.target, () => {
+                        if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                    });
+                    return;
+                }
+
+                const assetEl = findAssetElement(path);
+                if (assetEl) {
+                    const uiAsset = (assetEl.tagName === 'UI-ASSET' ? assetEl : assetEl.querySelector('ui-asset')) as HTMLElement || assetEl;
+                    syncUiAssetToDump(uiAsset, _lastDump);
+                }
+
+                console.log(`[pTS Inspector] Enter key hit on primary field -> triggering auto-save.`);
+                if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+            }
+        }, true);
+
+        // 4. DROP event:
+        // Asset drag and drop
         this.$.view.addEventListener('drop', (e: Event) => {
             setTimeout(() => {
                 const path = e.composedPath ? e.composedPath() : [e.target];
-                const uiAsset = path.find((node: any) => node && node.tagName === 'UI-ASSET') as HTMLElement;
-                if (uiAsset) {
+                const assetEl = findAssetElement(path);
+                if (assetEl) {
+                    const uiAsset = (assetEl.tagName === 'UI-ASSET' ? assetEl : assetEl.querySelector('ui-asset')) as HTMLElement || assetEl;
                     syncUiAssetToDump(uiAsset, _lastDump);
                 }
                 if (_currentTriggerAutoSave) _currentTriggerAutoSave();
