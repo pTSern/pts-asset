@@ -1,6 +1,7 @@
 
 import { _decorator } from 'cc';
-import pTSAsset from '../json/pTSAsset';
+import { pTSAsset } from 'db://pts-core/scripts/pTSAsset';
+import '../json/Json.Register';
 
 const { ccclass } = _decorator;
 

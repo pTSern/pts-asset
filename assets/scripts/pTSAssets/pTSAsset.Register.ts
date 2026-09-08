@@ -1,5 +1,6 @@
 import { _decorator, Component, Asset } from 'cc';
 import { registerLazyAsset } from '../_$secret/_lazy-migration';
+import '../json/Json.Register';
 
 const { ccclass, property } = _decorator;
 

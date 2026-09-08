@@ -38,6 +38,38 @@ function getMountedAssetDirs(pkgJson: any, extDir: string): string[] {
     return dirs;
 }
 
+function parseTsFile(filePath: string): void {
+    try {
+        if (!fs.existsSync(filePath)) return;
+        const content = fs.readFileSync(filePath, 'utf8');
+        if (!content.includes('class')) return;
+
+        const classRegex = /((?:export\s+|default\s+|abstract\s+)*)class\s+([A-Za-z0-9_]+)(?:<[\s\S]*?>)?\s+extends\s+([A-Za-z0-9_.]+)(?:<[\s\S]*?>)?/g;
+
+        for (const match of content.matchAll(classRegex)) {
+            const tsClassName = match[2];
+            const parentRaw = match[3];
+            const parentClass = parentRaw.split('.').pop() || parentRaw;
+
+            let finalClassName = tsClassName;
+            const textBefore = content.substring(0, match.index);
+            const ccMatches = [...textBefore.matchAll(/@ccclass\s*(?:\(\s*['"]([^'"]+)['"]\s*\))?/g)];
+            if (ccMatches.length > 0) {
+                const lastCc = ccMatches[ccMatches.length - 1];
+                if (!textBefore.substring(lastCc.index!).includes('class ') && lastCc[1]) {
+                    finalClassName = lastCc[1];
+                }
+            }
+
+            _tsToCcMap.set(tsClassName, finalClassName);
+            _ccToTsMap.set(finalClassName, tsClassName);
+
+            _parentMap.set(tsClassName, parentClass);
+            _parentMap.set(finalClassName, parentClass);
+        }
+    } catch {}
+}
+
 export function scanInheritance(force: boolean = false): void {
     if (_hasScanned && !force) return;
     _hasScanned = true;
@@ -132,36 +164,19 @@ export function scanInheritance(force: boolean = false): void {
         walk(dir);
     }
 
-    const classRegex = /((?:export\s+|default\s+|abstract\s+)*)class\s+([A-Za-z0-9_]+)(?:<[\s\S]*?>)?\s+extends\s+([A-Za-z0-9_.]+)(?:<[\s\S]*?>)?/g;
-
     for (const filePath of allTsFiles) {
-        try {
-            const content = fs.readFileSync(filePath, 'utf8');
-            if (!content.includes('class')) continue;
-
-            for (const match of content.matchAll(classRegex)) {
-                const tsClassName = match[2];
-                const parentRaw = match[3];
-                const parentClass = parentRaw.split('.').pop() || parentRaw;
-
-                let finalClassName = tsClassName;
-                const textBefore = content.substring(0, match.index);
-                const ccMatches = [...textBefore.matchAll(/@ccclass\s*\(\s*['"]([^'"]+)['"]\s*\)/g)];
-                if (ccMatches.length > 0) {
-                    const lastCc = ccMatches[ccMatches.length - 1];
-                    if (!textBefore.substring(lastCc.index!).includes('class ')) {
-                        finalClassName = lastCc[1];
-                    }
-                }
-
-                _tsToCcMap.set(tsClassName, finalClassName);
-                _ccToTsMap.set(finalClassName, tsClassName);
-
-                _parentMap.set(tsClassName, parentClass);
-                _parentMap.set(finalClassName, parentClass);
-            }
-        } catch {}
+        parseTsFile(filePath);
     }
+}
+
+export function scanSingleFile(filePath: string): void {
+    if (!filePath || !filePath.endsWith('.ts') || filePath.endsWith('.d.ts')) return;
+    parseTsFile(filePath);
+}
+
+export function hasScannedClass(className: string): boolean {
+    if (!className) return true;
+    return _runtimeChains.has(className) || _parentMap.has(className) || _tsToCcMap.has(className) || _ccToTsMap.has(className);
 }
 
 export function setRuntimeInheritanceChains(chains: Record<string, string[]>): void {
@@ -183,18 +198,22 @@ export function clearInheritanceCache(): void {
 
 /**
  * Computes the complete inheritance chain (from root to leaf) for any class name.
- * e.g. 'pTSAsset_Number' -> ['cc.Asset', 'Asset', 'pTSAsset', 'pTSAsset_Data', 'pTSAsset_Number']
+ * e.g. 'pTSAsset_Number' -> ['cc.Object', 'Eventified', 'cc.Asset', 'Asset', 'pTSAsset', 'pTSAsset_Data', 'pTSAsset_Number']
  */
 export function getExtendsChain(className: string): string[] {
     if (!className) {
-        return ['cc.Asset', 'Asset', 'pTSAsset'];
+        return ['cc.Object', 'Eventified', 'cc.Asset', 'Asset', 'pTSAsset'];
     }
 
     if (_runtimeChains.has(className)) {
         return _runtimeChains.get(className)!;
     }
 
-    scanInheritance();
+    if (!hasScannedClass(className)) {
+        scanInheritance(true);
+    } else {
+        scanInheritance(false);
+    }
 
     const chain: string[] = [];
     const visited = new Set<string>();
@@ -244,6 +263,12 @@ export function getExtendsChain(className: string): string[] {
     }
     if (!chain.includes('cc.Asset')) {
         chain.unshift('cc.Asset');
+    }
+    if (!chain.includes('Eventified')) {
+        chain.unshift('Eventified');
+    }
+    if (!chain.includes('cc.Object')) {
+        chain.unshift('cc.Object');
     }
 
     return chain;
