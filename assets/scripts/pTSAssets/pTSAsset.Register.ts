@@ -1,5 +1,4 @@
 import { _decorator, Component, Asset } from 'cc';
-import pTSAsset from '../json/pTSAsset';
 import { registerLazyAsset } from '../_$secret/_lazy-migration';
 
 const { ccclass, property } = _decorator;
