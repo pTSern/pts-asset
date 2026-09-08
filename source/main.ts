@@ -4,7 +4,7 @@ import path from 'path'
 
 import { AssetInfo, IAssetMeta } from '@cocos/creator-types/editor/packages/asset-db/@types/public'
 import { getExtendsChain, setRuntimeInheritanceChains, clearInheritanceCache, scanSingleFile, scanInheritance } from './inheritance'
-import { rescanAndSyncLazyPrefab } from './lazy-registry'
+import { rescanAndSyncLazyPrefab, cleanOrphanMetas } from './lazy-registry'
 
 function openUrl(url: string) {
     try {
@@ -509,6 +509,18 @@ function _installMessageHook() {
         const result = await _originalRequest.apply(Editor.Message, [pkg, message, ...args]);
 
         if (pkg === 'asset-db') {
+            if (!result) {
+                console.warn(`[MSG HOOK] ⚠️ asset-db:${message}(${JSON.stringify(args)}) returned null/undefined`);
+            } else if (Array.isArray(result)) {
+                const nullIdx = [];
+                for (let i = 0; i < result.length; i++) {
+                    if (!result[i]) nullIdx.push(i);
+                }
+                if (nullIdx.length > 0) {
+                    console.error(`[MSG HOOK] 🚨 asset-db:${message} returned array with null/undefined at indices:`, nullIdx);
+                }
+            }
+
             if (message === 'query-asset-info' && result) {
                 _enrichPtsAssetInfo(result);
             } else if (message === 'query-assets' && Array.isArray(result)) {
@@ -519,7 +531,7 @@ function _installMessageHook() {
         }
         return result;
     };
-    console.log('[pts-asset] Installed Editor.Message.request hook for query-asset-info and query-assets');
+    console.log('[pts-asset] Installed Editor.Message.request hook with diagnostic logging');
 }
 
 function _uninstallMessageHook() {
@@ -537,6 +549,12 @@ function _uninstallMessageHook() {
 export async function load() {
     checkPtsCoreDependency(false);
     _installMessageHook();
+
+    try {
+        const projectPath = (typeof Editor !== 'undefined' && Editor.Project && Editor.Project.path) ? Editor.Project.path : process.cwd();
+        cleanOrphanMetas(path.join(projectPath, 'assets'));
+        cleanOrphanMetas(path.join(projectPath, 'extensions/pts-asset/assets'));
+    } catch {}
 
     try {
         Editor.Message.request('scene', 'execute-scene-script', {
