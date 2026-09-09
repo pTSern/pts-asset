@@ -292,27 +292,10 @@ function updateLiveDumpAndFields(panel: PanelThis, liveValues: Record<string, an
         const prevArrayLen = dumpItem.isArray && Array.isArray(dumpItem.value) ? dumpItem.value.length : -1;
         populateDumpWithSaved(dumpItem, liveVal);
 
-        if (dumpItem.isArray) {
-            const newArrayLen = Array.isArray(dumpItem.value) ? dumpItem.value.length : 0;
-            if (prevArrayLen !== newArrayLen) {
-                needsFullReRender = true;
-            } else {
-                const items = panel.$.view.querySelectorAll(`.pts-array-item[data-key="${key}"]`);
-                if (items.length === newArrayLen) {
-                    items.forEach((el: any, index: number) => {
-                        el.dump = dumpItem.value[index];
-                        if (el.render) el.render(dumpItem.value[index]);
-                    });
-                } else {
-                    needsFullReRender = true;
-                }
-            }
-        } else {
-            const el = panel.$.view.querySelector(`.pts-basic-prop[data-key="${key}"]`) as any;
-            if (el) {
-                el.dump = dumpItem;
-                if (el.render) el.render(dumpItem);
-            }
+        const el = panel.$.view.querySelector(`.pts-basic-prop[data-key="${key}"]`) as any;
+        if (el) {
+            el.dump = dumpItem;
+            if (el.render) el.render(dumpItem);
         }
     }
 
@@ -410,7 +393,7 @@ function isNestedDump(val: any): boolean {
 }
 
 function isAssetType(dump: any): boolean {
-    if (!dump) return false;
+    if (!dump || dump.isArray) return false;
     if (isNodeOrComponent(dump)) return false;
     if (dump.extends?.includes('cc.Asset') || dump.type === 'cc.Asset') return true;
     if (dump.value && typeof dump.value === 'object' && 'uuid' in dump.value) return true;
@@ -937,24 +920,9 @@ function resolveFieldInStruct(uiAsset: HTMLElement, boundaryEl: HTMLElement, str
 function resolveDumpForUiAsset(uiAsset: HTMLElement, rootDump: any = _lastDump): any {
     if (!rootDump || !rootDump.value) return null;
 
-    const arrayItem = uiAsset.closest('.pts-array-item') as HTMLElement;
-    if (arrayItem) {
-        const key = arrayItem.dataset.key;
-        const indexStr = arrayItem.dataset.index;
-        if (key && indexStr !== undefined) {
-            const index = parseInt(indexStr, 10);
-            const arrayDump = rootDump.value[key];
-            if (arrayDump && Array.isArray(arrayDump.value)) {
-                const itemDump = arrayDump.value[index];
-                if (itemDump) {
-                    if (isAssetType(itemDump)) return itemDump;
-                    if (itemDump.value && typeof itemDump.value === 'object') {
-                        return resolveFieldInStruct(uiAsset, arrayItem, itemDump);
-                    }
-                }
-            }
-        }
-        return null;
+    const closestUiProp = uiAsset.closest('ui-prop') as any;
+    if (closestUiProp && closestUiProp.dump) {
+        if (isAssetType(closestUiProp.dump)) return closestUiProp.dump;
     }
 
     const basicProp = uiAsset.closest('.pts-basic-prop') as HTMLElement;
@@ -1011,62 +979,6 @@ function bindUiAssetEvents(root: Element | DocumentFragment | null, onTrigger: (
             setTimeout(handleUpdate, 30);
         });
     });
-}
-
-function handleArrayResize(targetInput: any, onTrigger: () => void) {
-    const key = targetInput.dataset.key;
-    const newSize = parseInt(targetInput.value, 10);
-    if (isNaN(newSize) || newSize < 0) return;
-    if (!_lastDump?.value?.[key]) return;
-    const item = _lastDump.value[key];
-    const oldSize = Array.isArray(item.value) ? item.value.length : 0;
-    
-    if (newSize !== oldSize) {
-        if (newSize > oldSize) {
-            for (let i = oldSize; i < newSize; i++) {
-                const newItem = JSON.parse(JSON.stringify(item.elementTypeData));
-                item.value.push(newItem);
-            }
-        } else if (newSize < oldSize) {
-            item.value.length = newSize;
-        }
-        
-        const arraySection = targetInput.closest('.pts-array');
-        const elementsContainer = arraySection?.querySelector('.pts-array-elements');
-        const headerLabel = arraySection?.querySelector('ui-label[slot="header"]');
-        
-        if (headerLabel) {
-            headerLabel.value = `${_format(key)} [${newSize}]`;
-        }
-
-        if (elementsContainer) {
-            if (newSize > oldSize) {
-                for (let i = oldSize; i < newSize; i++) {
-                    const newProp = document.createElement('ui-prop') as any;
-                    newProp.setAttribute('type', 'dump');
-                    newProp.classList.add('pts-array-item');
-                    newProp.dataset.key = key;
-                    newProp.dataset.index = i.toString();
-                    newProp.dump = item.value[i];
-                    elementsContainer.appendChild(newProp);
-                    
-                    if (newProp.render) {
-                        newProp.render(item.value[i]);
-                    } else {
-                        setTimeout(() => { if (newProp.render) newProp.render(item.value[i]); }, 10);
-                    }
-                }
-                setTimeout(() => {
-                    bindUiAssetEvents(elementsContainer, onTrigger);
-                }, 30);
-            } else {
-                const items = elementsContainer.querySelectorAll('.pts-array-item');
-                for (let i = oldSize - 1; i >= newSize; i--) {
-                    items[i].remove();
-                }
-            }
-        }
-    }
 }
 
 interface GroupInfo {
@@ -1167,7 +1079,7 @@ function bindTabGroupEvents(container: HTMLElement) {
 function updateGroupSectionVisibility(panel: PanelThis) {
     if (!panel.$.view) return;
     panel.$.view.querySelectorAll('.pts-group-section').forEach((groupEl: any) => {
-        const childProps = groupEl.querySelectorAll('.pts-basic-prop, .pts-array');
+        const childProps = groupEl.querySelectorAll('.pts-basic-prop');
         let hasVisible = false;
         childProps.forEach((p: HTMLElement) => {
             if (p.style.display !== 'none') {
@@ -1391,12 +1303,15 @@ function findAssetElement(path: any[]): HTMLElement | null {
     if (!Array.isArray(path)) return null;
     for (const node of path) {
         if (!node || !node.tagName) continue;
+        if (node.dump && node.dump.isArray) continue;
         const tag = node.tagName.toUpperCase();
         if (tag === 'UI-ASSET' || tag === 'CC-ASSET') return node;
-        if (node.classList && (node.classList.contains('cc-asset') || node.classList.contains('ui-asset') || node.classList.contains('pts-asset'))) return node;
-        if (node.getAttribute && (node.getAttribute('type') === 'cc.Asset' || node.getAttribute('droppable') === 'cc.Asset')) return node;
+        if (node.classList && (node.classList.contains('cc-asset') || node.classList.contains('ui-asset') || node.classList.contains('pts-asset'))) {
+            if (!node.classList.contains('pts-basic-prop')) return node;
+        }
+        if (tag !== 'UI-PROP' && tag !== 'CC-PROP' && node.getAttribute && (node.getAttribute('type') === 'cc.Asset' || node.getAttribute('droppable') === 'cc.Asset')) return node;
         const dump = node.dump;
-        if (dump && isAssetType(dump)) return node;
+        if (dump && !dump.isArray && isAssetType(dump)) return node;
     }
     return null;
 }
@@ -1444,7 +1359,7 @@ function isPrimaryInput(path: any[]): boolean {
                 return true;
             }
         }
-        if (node.classList && (node.classList.contains('cc-prop') || node.classList.contains('pts-basic-prop') || node.classList.contains('pts-array-item'))) {
+        if (node.classList && (node.classList.contains('cc-prop') || node.classList.contains('pts-basic-prop'))) {
             const dump = node.dump;
             if (dump && (dump.type === 'String' || dump.type === 'Number' || dump.type === 'Float' || dump.type === 'Integer')) {
                 return true;
@@ -1461,10 +1376,6 @@ function applyDumpVisibility(panel: PanelThis, visibilityMap?: Record<string, bo
             const el = panel.$.view.querySelector(`.pts-basic-prop[data-key="${key}"]`) as HTMLElement;
             if (el) {
                 el.style.display = isVis ? '' : 'none';
-            }
-            const arrEl = panel.$.view.querySelector(`.pts-array[data-key="${key}"]`) as HTMLElement;
-            if (arrEl) {
-                arrEl.style.display = isVis ? '' : 'none';
             }
         }
     }
@@ -1508,27 +1419,44 @@ function collectValuesForLiveEvaluation(panel: PanelThis): Record<string, any> {
         }
     });
 
-    const arrayValues: Record<string, any[]> = {};
-    panel.$.view.querySelectorAll('.pts-array-item').forEach((el: any) => {
-        const key = el.dataset.key;
-        const index = parseInt(el.dataset.index, 10);
-        const dump = el.dump || (_lastDump.value && _lastDump.value[key]?.value?.[index]);
-        if (dump && key) {
-            if (!arrayValues[key]) arrayValues[key] = [];
-            arrayValues[key][index] = extractDumpValue(dump);
-        }
-    });
-    for (const k in arrayValues) {
-        values[k] = arrayValues[k];
-    }
-
     return values;
 }
 
 let _isTickingInProgress = false;
 
+function isPanelFocusedAndActive(panel: PanelThis): boolean {
+    if (_isInLivePreviewMode) return false;
+    if (!_currentAsset || !_cachedData || !_cachedData.__type__) return false;
+    if (!panel || !panel.$.view) return false;
+
+    // 1. Check if view element is attached to DOM
+    if (!panel.$.view.isConnected) return false;
+
+    // 2. Check if view element is visible
+    if (panel.$.view.offsetParent === null && panel.$.view.offsetWidth === 0 && panel.$.view.offsetHeight === 0) {
+        return false;
+    }
+
+    // 3. Check if editor window has focus
+    if (typeof document !== 'undefined' && typeof document.hasFocus === 'function') {
+        if (!document.hasFocus()) return false;
+    }
+
+    // 4. Check if current asset is selected in Editor
+    try {
+        if (typeof Editor !== 'undefined' && Editor.Selection && typeof Editor.Selection.getSelected === 'function') {
+            const selected = Editor.Selection.getSelected('asset');
+            if (Array.isArray(selected) && selected.length > 0 && !selected.includes(_currentAsset.uuid)) {
+                return false;
+            }
+        }
+    } catch {}
+
+    return true;
+}
+
 async function updateLiveGettersAndVisibility(panel: PanelThis) {
-    if (_isTickingInProgress || !_currentAsset || !_cachedData || !_cachedData.__type__) return;
+    if (_isTickingInProgress || !isPanelFocusedAndActive(panel)) return;
     _isTickingInProgress = true;
     try {
         const currentValues = collectValuesForLiveEvaluation(panel);
@@ -1542,7 +1470,12 @@ async function updateLiveGettersAndVisibility(panel: PanelThis) {
             }
         );
 
-        if (!result || result.error) return;
+        if (!result || result.error) {
+            if (result && result.isRuntime) {
+                stopInspectorTicking();
+            }
+            return;
+        }
 
         // 1. Update visibility for top-level and array items
         if (result.visibility || result.arrayVisibility) {
@@ -1618,33 +1551,6 @@ async function updateLiveGettersAndVisibility(panel: PanelThis) {
             }
         }
 
-        // 5. Update dynamic enumList for array items
-        if (result.arrayEnumLists && panel.$.view && _lastDump && _lastDump.value) {
-            for (const [arrayKey, itemsEnumLists] of Object.entries(result.arrayEnumLists)) {
-                const arrayDump = _lastDump.value[arrayKey];
-                if (!arrayDump || !Array.isArray(arrayDump.value)) continue;
-                let arrayChanged = false;
-                for (let idx = 0; idx < arrayDump.value.length; idx++) {
-                    const itemEnums = (itemsEnumLists as any)[idx];
-                    const itemDump = arrayDump.value[idx];
-                    if (itemEnums && itemDump && itemDump.value) {
-                        for (const [eKey, eList] of Object.entries(itemEnums)) {
-                            const targetSub = itemDump.value[eKey];
-                            if (targetSub && Array.isArray(eList) && eList.length > 0 && JSON.stringify(targetSub.enumList) !== JSON.stringify(eList)) {
-                                targetSub.enumList = eList;
-                                arrayChanged = true;
-                            }
-                        }
-                    }
-                }
-                if (arrayChanged) {
-                    const arrayPropEl = panel.$.view.querySelector(`.pts-basic-prop[data-key="${arrayKey}"]`) as any;
-                    if (arrayPropEl && arrayPropEl.render) {
-                        arrayPropEl.render(arrayDump);
-                    }
-                }
-            }
-        }
     } catch (e) {
     } finally {
         _isTickingInProgress = false;
@@ -1656,7 +1562,12 @@ let _inspectorTickTimer: any = null;
 function startInspectorTicking(panel: PanelThis) {
     stopInspectorTicking();
     _inspectorTickTimer = setInterval(() => {
-        if (_isInLivePreviewMode) return;
+        if (!isPanelFocusedAndActive(panel)) {
+            if (panel && panel.$.view && !panel.$.view.isConnected) {
+                stopInspectorTicking();
+            }
+            return;
+        }
         updateLiveGettersAndVisibility(panel);
     }, 200);
 }
@@ -1977,6 +1888,25 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         for (const el of path) {
             if (el && el.tagName === 'UI-PROP' && (el as any).dump && (el as any).dump.path) {
                 const dump = (el as any).dump;
+                if (dump.isArray) {
+                    const targetVal = (target as any)?.value;
+                    const parsed = typeof targetVal === 'number' ? targetVal : parseInt(targetVal, 10);
+                    if (typeof parsed === 'number' && !isNaN(parsed) && parsed >= 0) {
+                        if (Array.isArray(dump.value) && dump.value.length !== parsed) {
+                            while (dump.value.length < parsed) {
+                                const newElem = JSON.parse(JSON.stringify(dump.elementTypeData || {}));
+                                newElem.name = `[${dump.value.length}]`;
+                                newElem.path = `${dump.path}.${dump.value.length}`;
+                                dump.value.push(newElem);
+                            }
+                            if (dump.value.length > parsed) {
+                                dump.value.length = parsed;
+                            }
+                        }
+                    }
+                    return { propPath: dump.path, newValue: extractDumpValue(dump) };
+                }
+
                 if (newValue === undefined && dump.value !== undefined) {
                     newValue = dump.value;
                 }
@@ -2000,11 +1930,43 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         const parts = propPath.split('.');
         if (parts.length === 1) {
             const key = parts[0];
-            if (_lastDump?.value?.[key]) {
-                _lastDump.value[key].value = newValue;
+            const targetDump = _lastDump?.value?.[key];
+            if (targetDump && targetDump.isArray) {
+                populateDumpWithSaved(targetDump, newValue);
+                translateDump(targetDump.value, key);
+            } else if (targetDump) {
+                targetDump.value = newValue;
             }
             if (_cachedData.__value__) {
                 _cachedData.__value__[key] = newValue;
+            }
+        } else if (parts.length === 2) {
+            const [arrKey, idxStr] = parts;
+            const idx = parseInt(idxStr, 10);
+            const arrayDump = _lastDump?.value?.[arrKey];
+            if (arrayDump && Array.isArray(arrayDump.value) && arrayDump.value[idx]) {
+                const itemDump = arrayDump.value[idx];
+                if (isAssetType(itemDump)) {
+                    const uuid = typeof newValue === 'string' ? newValue : (newValue?.uuid || '');
+                    itemDump.value = { uuid };
+                } else {
+                    itemDump.value = newValue;
+                }
+            }
+            if (_cachedData.__value__) {
+                if (!Array.isArray(_cachedData.__value__[arrKey])) {
+                    _cachedData.__value__[arrKey] = [];
+                }
+                const rawArr = _cachedData.__value__[arrKey];
+                const arrayDump = _lastDump?.value?.[arrKey];
+                const itemDump = arrayDump?.value?.[idx];
+                if (itemDump && isAssetType(itemDump)) {
+                    const uuid = typeof newValue === 'string' ? newValue : (newValue?.uuid || '');
+                    const typeName = normalizeType(itemDump.type || itemDump.elementTypeData?.type || 'cc.Asset');
+                    rawArr[idx] = uuid ? { __type__: typeName, __value__: { uuid } } : null;
+                } else {
+                    rawArr[idx] = newValue;
+                }
             }
         } else if (parts.length === 3) {
             const [arrKey, idxStr, subKey] = parts;
@@ -2066,27 +2028,6 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 }
             }
 
-            // 1b. Update array item enumLists if modified
-            if (changeResult.arrayEnumLists && _lastDump && _lastDump.value) {
-                for (const [arrKey, itemsEnumLists] of Object.entries(changeResult.arrayEnumLists)) {
-                    const arrDump = _lastDump.value[arrKey];
-                    if (arrDump && Array.isArray(arrDump.value)) {
-                        for (let i = 0; i < arrDump.value.length; i++) {
-                            const itemEnums = (itemsEnumLists as any)[i];
-                            const itemDump = arrDump.value[i];
-                            if (itemEnums && itemDump && itemDump.value) {
-                                for (const [propName, enumList] of Object.entries(itemEnums)) {
-                                    const targetSub = itemDump.value[propName];
-                                    if (targetSub) {
-                                        targetSub.enumList = enumList;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
             // 2. Update backing fields (BEFORE re-rendering!)
             const lastProp = parts[parts.length - 1];
             const backingKey = '_' + lastProp;
@@ -2121,6 +2062,9 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 if (arrayPropEl && arrayPropEl.render) {
                     arrayPropEl.dump = arrayDump;
                     arrayPropEl.render(arrayDump);
+                    bindUiAssetEvents(arrayPropEl, () => {
+                        if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                    });
                 }
             }
 
@@ -2428,6 +2372,9 @@ export function ready(this: PanelThis) {
         if (_isInLivePreviewMode) {
             refreshLiveState(this);
         } else if (_currentAsset && _cachedData && _cachedData.__type__) {
+            if (!_inspectorTickTimer && !_isInLivePreviewMode) {
+                startInspectorTicking(this);
+            }
             Editor.Message.request('scene', 'execute-scene-script', {
                 name: 'pts-core',
                 method: 'on_pts_focus',
@@ -2444,4 +2391,7 @@ export function close(this: PanelThis) {
     stopPreviewPolling();
     stopInspectorTicking();
     _isInLivePreviewMode = false;
+    _currentAsset = null;
+    _cachedData = null;
+    _lastDump = null;
 }
