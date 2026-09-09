@@ -81,8 +81,55 @@ export const $ = {
     previewSubText: "#preview-sub-text"
 };
 
+export const style = `
+ui-section.pts-group-section {
+    margin-top: 6px;
+    margin-bottom: 6px;
+}
+
+ui-section.pts-group-section > ui-label[slot="header"] {
+    font-weight: 600;
+}
+
+.tab-group.pts-group-tab {
+    margin-top: 6px;
+    margin-bottom: 6px;
+}
+
+.tab-content {
+    display: none;
+    padding-top: 4px;
+    padding-bottom: 4px;
+}
+
+.tab-content.active {
+    display: block;
+}
+`;
+
 export const template = `
 <div class="pts-container" style="display: flex; flex-direction: column; height: 100%;">
+    <style>
+        ui-section.pts-group-section {
+            margin-top: 6px;
+            margin-bottom: 6px;
+        }
+        ui-section.pts-group-section > ui-label[slot="header"] {
+            font-weight: 600;
+        }
+        .tab-group.pts-group-tab {
+            margin-top: 6px;
+            margin-bottom: 6px;
+        }
+        .tab-content {
+            display: none;
+            padding-top: 4px;
+            padding-bottom: 4px;
+        }
+        .tab-content.active {
+            display: block;
+        }
+    </style>
     <div id="preview-banner" style="display: none; align-items: center; justify-content: space-between; padding: 6px 12px; background: #2e7d32; color: #fff; font-weight: bold; font-size: 12px; border-bottom: 1px solid #4caf50; z-index: 11;">
         <span id="preview-status-text">🟢 Live Preview Mode (Read-Only)</span>
         <span id="preview-sub-text" style="font-size: 11px; opacity: 0.9;">Runtime Instance Linked</span>
@@ -422,11 +469,19 @@ function populateDumpWithSaved(dump: any, savedVal: any) {
     // 3. Arrays
     if (dump.isArray) {
         if (Array.isArray(savedVal)) {
-            dump.value = savedVal.map((itemVal: any) => {
-                const elem = JSON.parse(JSON.stringify(dump.elementTypeData));
-                populateDumpWithSaved(elem, itemVal);
-                return elem;
-            });
+            if (!Array.isArray(dump.value)) {
+                dump.value = [];
+            }
+            while (dump.value.length < savedVal.length) {
+                const newElem = JSON.parse(JSON.stringify(dump.elementTypeData || {}));
+                dump.value.push(newElem);
+            }
+            if (dump.value.length > savedVal.length) {
+                dump.value.length = savedVal.length;
+            }
+            for (let i = 0; i < savedVal.length; i++) {
+                populateDumpWithSaved(dump.value[i], savedVal[i]);
+            }
         } else {
             dump.value = Array.isArray(dump.default) ? [...dump.default] : [];
         }
@@ -1014,6 +1069,115 @@ function handleArrayResize(targetInput: any, onTrigger: () => void) {
     }
 }
 
+interface GroupInfo {
+    id: string;
+    name: string;
+    displayOrder: number;
+    style: 'section' | 'tab';
+}
+
+function parseGroup(propDump: any, dumpGroups?: Record<string, any>): GroupInfo | null {
+    if (!propDump || !propDump.group) return null;
+    const g = propDump.group;
+    if (typeof g === 'string') {
+        const name = g.trim();
+        if (!name) return null;
+        return {
+            id: name,
+            name: name,
+            displayOrder: propDump.displayOrder !== undefined ? Number(propDump.displayOrder) : 0,
+            style: 'section'
+        };
+    }
+    if (typeof g === 'object') {
+        const name = (g.name || '').trim();
+        if (!name) return null;
+        const id = g.id || name;
+        const groupMeta = dumpGroups && dumpGroups[id];
+        const displayOrder = g.displayOrder !== undefined
+            ? Number(g.displayOrder)
+            : (groupMeta?.displayOrder !== undefined ? Number(groupMeta.displayOrder) : (propDump.displayOrder !== undefined ? Number(propDump.displayOrder) : 0));
+        const style = (g.style || groupMeta?.style || 'section') === 'tab' ? 'tab' : 'section';
+        return {
+            id,
+            name,
+            displayOrder,
+            style
+        };
+    }
+    return null;
+}
+
+function translateDump(dump: any, path: string = '') {
+    if (!dump || typeof dump !== 'object') return;
+    if (Array.isArray(dump)) {
+        dump.forEach((item, index) => {
+            if (item && typeof item === 'object') {
+                item.name = `[${index}]`;
+                item.path = path ? `${path}.${index}` : `${index}`;
+                if (item.value && typeof item.value === 'object') {
+                    translateDump(item.value, item.path);
+                }
+                delete item.displayName;
+            }
+        });
+        return;
+    }
+    for (const name of Object.keys(dump)) {
+        if (_ignores.includes(name)) continue;
+        const item = dump[name];
+        if (item && typeof item === 'object') {
+            item.name = name;
+            item.path = path ? `${path}.${name}` : name;
+            if (item.value && typeof item.value === 'object') {
+                translateDump(item.value, item.path);
+            }
+        }
+    }
+}
+
+function renderSinglePropHtml(dumpValue: any, curKey: string): string {
+    const item = dumpValue[curKey] as _TData;
+    const isHidden = item && item.visible === false;
+    return `<ui-prop type="dump" class="pts-basic-prop" data-key="${curKey}" ${isHidden ? 'style="display: none"' : ''}></ui-prop>`;
+}
+
+function bindTabGroupEvents(container: HTMLElement) {
+    if (!container) return;
+    container.querySelectorAll('.pts-group-tab').forEach((tabGroupEl: any) => {
+        const tabHeader = tabGroupEl.querySelector('ui-tab.tab-header');
+        if (!tabHeader || tabHeader.__pts_bound__) return;
+        tabHeader.__pts_bound__ = true;
+        tabHeader.addEventListener('change', (e: any) => {
+            const activeIdx = Number(e.target.value);
+            const tabContents = tabGroupEl.querySelectorAll('.tab-content');
+            tabContents.forEach((c: HTMLElement, idx: number) => {
+                if (idx === activeIdx) {
+                    c.style.display = 'block';
+                    c.classList.add('active');
+                } else {
+                    c.style.display = 'none';
+                    c.classList.remove('active');
+                }
+            });
+        });
+    });
+}
+
+function updateGroupSectionVisibility(panel: PanelThis) {
+    if (!panel.$.view) return;
+    panel.$.view.querySelectorAll('.pts-group-section').forEach((groupEl: any) => {
+        const childProps = groupEl.querySelectorAll('.pts-basic-prop, .pts-array');
+        let hasVisible = false;
+        childProps.forEach((p: HTMLElement) => {
+            if (p.style.display !== 'none') {
+                hasVisible = true;
+            }
+        });
+        groupEl.style.display = hasVisible ? '' : 'none';
+    });
+}
+
 let _currentTriggerAutoSave: (() => void) | null = null;
 
 async function renderView(this: PanelThis, dumpValue: any) {
@@ -1032,56 +1196,141 @@ async function renderView(this: PanelThis, dumpValue: any) {
         const _item = dumpValue[_cur];
         populateDumpWithSaved(_item, _val[_cur]);
     });
+    translateDump(dumpValue, '');
 
-    // 2. Generate UI containers
-    this.$.view.innerHTML = _keys.reduce((_prev, _cur) => {
-        const _item = dumpValue[_cur] as _TData;
-        const isHidden = _item && _item.visible === false;
-        if (_item.isArray) {
-            const isNodeComp = isNodeOrComponentArray(_item);
-            _prev += `
-                <ui-section expand class="pts-array" data-key="${_cur}" ${isHidden ? 'style="display: none"' : ''}>
-                    <ui-label slot="header">${_format(_cur)} [${_item.value.length}]</ui-label>
-                    <ui-prop>
-                        <ui-label slot="label">Size</ui-label>
-                        <ui-num-input class="pts-array-size" slot="content" value="${_item.value.length}" data-key="${_cur}" step="1" min="0" ${isNodeComp ? 'disabled' : ''}></ui-num-input>
-                    </ui-prop>
-                    <div class="pts-array-elements">
-                        ${_item.value.map((_: any, i: number) => `<ui-prop type="dump" class="pts-array-item" data-key="${_cur}" data-index="${i}"></ui-prop>`).join('')}
-                    </div>
-                </ui-section>
-            `;
-        } else {
-            _prev += `<ui-prop type="dump" class="pts-basic-prop" data-key="${_cur}" ${isHidden ? 'style="display: none"' : ''}></ui-prop>`;
-        }
-        return _prev;
-    }, "");
+    // 2. Generate UI containers with Group & DisplayOrder support
+    type RenderEntry =
+        | { type: 'prop'; key: string; displayOrder: number }
+        | { type: 'section'; name: string; id: string; displayOrder: number; keys: string[] }
+        | { type: 'tab'; id: string; displayOrder: number; tabs: Record<string, string[]> };
 
-    // 3. Render dump descriptors into ui-prop elements
-    _keys.forEach(_key => {
-        const _item = dumpValue[_key];
-        if (_item.isArray) {
-            const elements = this.$.view.querySelectorAll(`.pts-array-item[data-key="${_key}"]`);
-            elements.forEach((el: any, index: number) => {
-                el.dump = _item.value[index];
-                el.render(_item.value[index]);
+    const dumpGroups = dumpValue.groups || (_lastDump && _lastDump.groups) || {};
+    const entries: RenderEntry[] = [];
+    const sectionMap = new Map<string, { type: 'section'; name: string; id: string; displayOrder: number; keys: string[] }>();
+    const tabGroupMap = new Map<string, { type: 'tab'; id: string; displayOrder: number; tabs: Record<string, string[]> }>();
+
+    _keys.forEach(key => {
+        const item = dumpValue[key];
+        const g = parseGroup(item, dumpGroups);
+        if (!g) {
+            entries.push({
+                type: 'prop',
+                key,
+                displayOrder: item.displayOrder !== undefined ? Number(item.displayOrder) : 0
             });
+        } else if (g.style === 'tab') {
+            let tabEntry = tabGroupMap.get(g.id);
+            if (!tabEntry) {
+                tabEntry = {
+                    type: 'tab',
+                    id: g.id,
+                    displayOrder: g.displayOrder,
+                    tabs: {}
+                };
+                tabGroupMap.set(g.id, tabEntry);
+                entries.push(tabEntry);
+            }
+            if (!tabEntry.tabs[g.name]) {
+                tabEntry.tabs[g.name] = [];
+            }
+            tabEntry.tabs[g.name].push(key);
+            if (g.displayOrder < tabEntry.displayOrder) {
+                tabEntry.displayOrder = g.displayOrder;
+            }
         } else {
-            const el = this.$.view.querySelector(`.pts-basic-prop[data-key="${_key}"]`) as any;
-            if (el) {
-                el.dump = _item;
-                el.render(_item);
-                el.style.display = _item && _item.visible === false ? 'none' : '';
+            let secEntry = sectionMap.get(g.name);
+            if (!secEntry) {
+                secEntry = {
+                    type: 'section',
+                    name: g.name,
+                    id: g.id,
+                    displayOrder: g.displayOrder,
+                    keys: []
+                };
+                sectionMap.set(g.name, secEntry);
+                entries.push(secEntry);
+            }
+            secEntry.keys.push(key);
+            if (g.displayOrder < secEntry.displayOrder) {
+                secEntry.displayOrder = g.displayOrder;
             }
         }
     });
 
-    // 4. Bind events to all rendered ui-asset elements
+    entries.sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0));
+
+    entries.forEach(entry => {
+        if (entry.type === 'section') {
+            entry.keys.sort((a, b) => {
+                const ordA = dumpValue[a].displayOrder !== undefined ? Number(dumpValue[a].displayOrder) : 0;
+                const ordB = dumpValue[b].displayOrder !== undefined ? Number(dumpValue[b].displayOrder) : 0;
+                return ordA - ordB;
+            });
+        } else if (entry.type === 'tab') {
+            for (const tabName in entry.tabs) {
+                entry.tabs[tabName].sort((a, b) => {
+                    const ordA = dumpValue[a].displayOrder !== undefined ? Number(dumpValue[a].displayOrder) : 0;
+                    const ordB = dumpValue[b].displayOrder !== undefined ? Number(dumpValue[b].displayOrder) : 0;
+                    return ordA - ordB;
+                });
+            }
+        }
+    });
+
+    let html = '';
+    entries.forEach(entry => {
+        if (entry.type === 'prop') {
+            html += renderSinglePropHtml(dumpValue, entry.key);
+        } else if (entry.type === 'section') {
+            const groupKey = encodeURIComponent(entry.name);
+            html += `
+                <ui-section expand class="ui-prop-group-content pts-group-section" cache-expand="pts-group-${groupKey}" data-group="${entry.name}">
+                    <ui-label slot="header">${_format(entry.name)}</ui-label>
+                    ${entry.keys.map(k => renderSinglePropHtml(dumpValue, k)).join('')}
+                </ui-section>
+            `;
+        } else if (entry.type === 'tab') {
+            const tabNames = Object.keys(entry.tabs);
+            html += `
+                <div class="tab-group pts-group-tab" data-group="${entry.id}">
+                    <ui-tab class="tab-header">
+                        ${tabNames.map((tabName, idx) => `<ui-button name="${tabName}" ${idx === 0 ? 'active' : ''}><ui-label value="${_format(tabName)}"></ui-label></ui-button>`).join('')}
+                    </ui-tab>
+                    ${tabNames.map((tabName, idx) => `
+                        <div class="tab-content ${idx === 0 ? 'active' : ''}" name="${tabName}" style="${idx === 0 ? '' : 'display: none;'}">
+                            ${entry.tabs[tabName].map(k => renderSinglePropHtml(dumpValue, k)).join('')}
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+        }
+    });
+
+    this.$.view.innerHTML = html;
+
+    // 3. Render dump descriptors into ui-prop elements
+    _keys.forEach(_key => {
+        const _item = dumpValue[_key];
+        const el = this.$.view.querySelector(`.pts-basic-prop[data-key="${_key}"]`) as any;
+        if (el) {
+            el.dump = _item;
+            el.render(_item);
+            el.style.display = _item && _item.visible === false ? 'none' : '';
+        }
+    });
+
+    // 4. Bind tab events
+    bindTabGroupEvents(this.$.view);
+
+    // 5. Bind events to all rendered ui-asset elements
     bindUiAssetEvents(this.$.view, () => {
         if (_currentTriggerAutoSave) _currentTriggerAutoSave();
     });
 
-    // 5. Evaluate dynamic visibility and getters right after render
+    // 6. Update group visibility based on child property visibility
+    updateGroupSectionVisibility(this);
+
+    // 7. Evaluate dynamic visibility and getters right after render
     updateLiveGettersAndVisibility(this);
 
     if (this.$.jsonDisplay && _currentAsset) {
@@ -1223,25 +1472,28 @@ function applyDumpVisibility(panel: PanelThis, visibilityMap?: Record<string, bo
         for (const [arrayKey, itemsVis] of Object.entries(arrayVisibility)) {
             const arrayDump = _lastDump.value[arrayKey];
             if (!arrayDump || !Array.isArray(arrayDump.value)) continue;
-            const itemEls = panel.$.view.querySelectorAll(`.pts-array-item[data-key="${arrayKey}"]`);
-            itemEls.forEach((el: any, idx: number) => {
+            let arrayChanged = false;
+            for (let idx = 0; idx < arrayDump.value.length; idx++) {
                 const itemVis = itemsVis[idx];
                 if (itemVis && arrayDump.value[idx] && arrayDump.value[idx].value) {
-                    let changed = false;
                     for (const [subKey, subVis] of Object.entries(itemVis)) {
                         const targetSub = arrayDump.value[idx].value[subKey];
                         if (targetSub && targetSub.visible !== subVis) {
                             targetSub.visible = subVis;
-                            changed = true;
+                            arrayChanged = true;
                         }
                     }
-                    if (changed && el.render) {
-                        el.render(arrayDump.value[idx]);
-                    }
                 }
-            });
+            }
+            if (arrayChanged) {
+                const arrayPropEl = panel.$.view.querySelector(`.pts-basic-prop[data-key="${arrayKey}"]`) as any;
+                if (arrayPropEl && arrayPropEl.render) {
+                    arrayPropEl.render(arrayDump);
+                }
+            }
         }
     }
+    updateGroupSectionVisibility(panel);
 }
 
 function collectValuesForLiveEvaluation(panel: PanelThis): Record<string, any> {
@@ -1328,23 +1580,69 @@ async function updateLiveGettersAndVisibility(panel: PanelThis) {
             for (const [arrayKey, itemsGetters] of Object.entries(result.arrayGetters)) {
                 const arrayDump = _lastDump.value[arrayKey];
                 if (!arrayDump || !Array.isArray(arrayDump.value)) continue;
-                const itemEls = panel.$.view.querySelectorAll(`.pts-array-item[data-key="${arrayKey}"]`);
-                itemEls.forEach((el: any, idx: number) => {
+                let arrayChanged = false;
+                for (let idx = 0; idx < arrayDump.value.length; idx++) {
                     const itemGets = (itemsGetters as any)[idx];
-                    if (itemGets && arrayDump.value[idx] && arrayDump.value[idx].value) {
-                        let changed = false;
+                    const itemDump = arrayDump.value[idx];
+                    if (itemGets && itemDump && itemDump.value) {
                         for (const [gKey, gVal] of Object.entries(itemGets)) {
-                            const targetSub = arrayDump.value[idx].value[gKey];
+                            const targetSub = itemDump.value[gKey];
                             if (targetSub && targetSub.value !== gVal) {
                                 targetSub.value = gVal;
-                                changed = true;
+                                arrayChanged = true;
                             }
                         }
-                        if (changed && el.render) {
-                            el.render(arrayDump.value[idx]);
+                    }
+                }
+                if (arrayChanged) {
+                    const arrayPropEl = panel.$.view.querySelector(`.pts-basic-prop[data-key="${arrayKey}"]`) as any;
+                    if (arrayPropEl && arrayPropEl.render) {
+                        arrayPropEl.render(arrayDump);
+                    }
+                }
+            }
+        }
+
+        // 4. Update dynamic enumList for top-level properties
+        if (result.enumLists && panel.$.view && _lastDump && _lastDump.value) {
+            for (const [propName, enumList] of Object.entries(result.enumLists)) {
+                const dumpItem = _lastDump.value[propName];
+                if (!dumpItem) continue;
+                if (Array.isArray(enumList) && enumList.length > 0 && JSON.stringify(dumpItem.enumList) !== JSON.stringify(enumList)) {
+                    dumpItem.enumList = enumList;
+                    const propEl = panel.$.view.querySelector(`.pts-basic-prop[data-key="${propName}"]`) as any;
+                    if (propEl && propEl.render) {
+                        propEl.render(dumpItem);
+                    }
+                }
+            }
+        }
+
+        // 5. Update dynamic enumList for array items
+        if (result.arrayEnumLists && panel.$.view && _lastDump && _lastDump.value) {
+            for (const [arrayKey, itemsEnumLists] of Object.entries(result.arrayEnumLists)) {
+                const arrayDump = _lastDump.value[arrayKey];
+                if (!arrayDump || !Array.isArray(arrayDump.value)) continue;
+                let arrayChanged = false;
+                for (let idx = 0; idx < arrayDump.value.length; idx++) {
+                    const itemEnums = (itemsEnumLists as any)[idx];
+                    const itemDump = arrayDump.value[idx];
+                    if (itemEnums && itemDump && itemDump.value) {
+                        for (const [eKey, eList] of Object.entries(itemEnums)) {
+                            const targetSub = itemDump.value[eKey];
+                            if (targetSub && Array.isArray(eList) && eList.length > 0 && JSON.stringify(targetSub.enumList) !== JSON.stringify(eList)) {
+                                targetSub.enumList = eList;
+                                arrayChanged = true;
+                            }
                         }
                     }
-                });
+                }
+                if (arrayChanged) {
+                    const arrayPropEl = panel.$.view.querySelector(`.pts-basic-prop[data-key="${arrayKey}"]`) as any;
+                    if (arrayPropEl && arrayPropEl.render) {
+                        arrayPropEl.render(arrayDump);
+                    }
+                }
             }
         }
     } catch (e) {
@@ -1411,6 +1709,15 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
     }
 
     this.$this.style.order = '-1';
+
+    // Trigger onFocusInEditor hook in scene script when asset is focused in Inspector
+    if (_cachedData && _cachedData.__type__) {
+        Editor.Message.request('scene', 'execute-scene-script', {
+            name: 'pts-core',
+            method: 'on_pts_focus',
+            args: [_cachedData.__type__, _cachedData.__value__, _currentAsset.uuid]
+        }).catch(() => {});
+    }
 
     // 1. Check if running in Editor Preview Mode
     const assetName = _currentAsset.displayName ? _currentAsset.displayName.replace(/\.pts$/, '') : (_currentAsset.name || '');
@@ -1530,27 +1837,28 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             }
         });
 
-        // Collect values from array items
-        const arrayValues: Record<string, any[]> = {};
-        this.$.view.querySelectorAll('.pts-array').forEach((el: any) => {
-            const key = el.dataset.key;
-            if (key) {
-                arrayValues[key] = [];
+        // Preserve backing fields (e.g. _bundle) for array items
+        if (_cachedData.__value__) {
+            for (const propName of Object.keys(_cachedData.__value__)) {
+                const arr = _cachedData.__value__[propName];
+                const dumpArr = _lastDump?.value?.[propName];
+                if (Array.isArray(arr) && dumpArr && Array.isArray(dumpArr.value)) {
+                    for (let i = 0; i < arr.length; i++) {
+                        const itemVal = arr[i]?.__value__ || arr[i];
+                        const dumpItem = dumpArr.value[i];
+                        const dumpItemVal = dumpItem?.value;
+                        if (itemVal && typeof itemVal === 'object' && dumpItemVal && typeof dumpItemVal === 'object') {
+                            for (const k in dumpItemVal) {
+                                if (k.startsWith('_') && (itemVal[k] === undefined || itemVal[k] === '')) {
+                                    if (dumpItemVal[k].value !== undefined && dumpItemVal[k].value !== '') {
+                                        itemVal[k] = dumpItemVal[k].value;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
-        });
-        this.$.view.querySelectorAll('.pts-array-item').forEach((el: any) => {
-            const key = el.dataset.key;
-            const index = parseInt(el.dataset.index, 10);
-            const dump = el.dump || (_lastDump?.value && _lastDump.value[key]?.value?.[index]);
-            if (dump) {
-                if (!arrayValues[key]) arrayValues[key] = [];
-                arrayValues[key][index] = extractDumpValue(dump);
-            }
-        });
-
-        // Merge array values into __value__
-        for (const key in arrayValues) {
-            _cachedData.__value__[key] = arrayValues[key];
         }
 
         // Preserve any properties from _lastDump.value not captured in DOM (excluding readonly getters)
@@ -1561,6 +1869,19 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 if (getterInfo && getterInfo.readonly) continue;
                 if (!(_cachedData.__value__.hasOwnProperty(key))) {
                     _cachedData.__value__[key] = extractDumpValue(_lastDump.value[key]);
+                }
+            }
+        }
+
+        // Preserve any backing fields (e.g. _bundle) from _cachedData.__value__
+        if (_cachedData.__value__) {
+            for (const k in _cachedData.__value__) {
+                if (k.startsWith('_') && _cachedData.__value__[k] !== undefined && _cachedData.__value__[k] !== '') {
+                    if (_lastDump?.value?.[k]?.value === undefined || _lastDump?.value?.[k]?.value === '') {
+                        if (_lastDump?.value?.[k]) {
+                            _lastDump.value[k].value = _cachedData.__value__[k];
+                        }
+                    }
                 }
             }
         }
@@ -1627,25 +1948,205 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
 
     _currentTriggerAutoSave = triggerAutoSave;
 
+    function resolveChangeFromEvent(e: any): { propPath: string; newValue: any } | null {
+        const path = e.composedPath ? e.composedPath() : [e.target];
+        const target = (e.target as HTMLElement) || (path && path[0]);
+        if (!target) return null;
+
+        let newValue: any = undefined;
+
+        const assetEl = findAssetElement(path);
+        if (assetEl) {
+            const uiAsset = (assetEl.tagName === 'UI-ASSET' ? assetEl : assetEl.querySelector('ui-asset')) as HTMLElement || assetEl;
+            newValue = (uiAsset as any).value || "";
+        } else {
+            const enumEl = findEnumElement(path);
+            if (enumEl) {
+                newValue = (enumEl as any).value;
+            } else {
+                const boolEl = findBooleanElement(path);
+                if (boolEl) {
+                    newValue = (boolEl as any).value !== undefined ? (boolEl as any).value : (boolEl as any).checked;
+                } else if ('value' in target) {
+                    newValue = (target as any).value;
+                }
+            }
+        }
+
+        // 1. Check for closest UI-PROP with dump.path
+        for (const el of path) {
+            if (el && el.tagName === 'UI-PROP' && (el as any).dump && (el as any).dump.path) {
+                const dump = (el as any).dump;
+                if (newValue === undefined && dump.value !== undefined) {
+                    newValue = dump.value;
+                }
+                return { propPath: dump.path, newValue };
+            }
+        }
+
+        // 2. Check basic prop container
+        const basicProp = target.closest('.pts-basic-prop') as HTMLElement;
+        if (basicProp && basicProp.dataset.key) {
+            return { propPath: basicProp.dataset.key, newValue };
+        }
+
+        return null;
+    }
+
+    async function applyPropertyChange(panel: PanelThis, propPath: string, newValue: any) {
+        if (_isInLivePreviewMode || !_currentAsset || !_cachedData || !_cachedData.__type__) return;
+
+        // Immediately update local dump node so UI is responsive
+        const parts = propPath.split('.');
+        if (parts.length === 1) {
+            const key = parts[0];
+            if (_lastDump?.value?.[key]) {
+                _lastDump.value[key].value = newValue;
+            }
+            if (_cachedData.__value__) {
+                _cachedData.__value__[key] = newValue;
+            }
+        } else if (parts.length === 3) {
+            const [arrKey, idxStr, subKey] = parts;
+            const idx = parseInt(idxStr, 10);
+            if (_lastDump?.value?.[arrKey]?.value?.[idx]?.value?.[subKey]) {
+                _lastDump.value[arrKey].value[idx].value[subKey].value = newValue;
+            }
+            if (_cachedData.__value__?.[arrKey]?.[idx]) {
+                const rawItem = _cachedData.__value__[arrKey][idx];
+                if (rawItem && typeof rawItem === 'object') {
+                    if (rawItem.__value__) {
+                        rawItem.__value__[subKey] = newValue;
+                    } else {
+                        rawItem[subKey] = newValue;
+                    }
+                }
+            }
+        }
+
+        try {
+            console.log(`[pTS Inspector] Applying property change: ${propPath} =`, newValue);
+            const changeResult: any = await Editor.Message.request(
+                'scene',
+                'execute-scene-script',
+                {
+                    name: 'pts-core',
+                    method: 'on_pts_property_changed',
+                    args: [_cachedData.__type__, _cachedData.__value__, propPath, newValue]
+                }
+            );
+
+            if (!changeResult || !changeResult.success) {
+                console.warn('[pTS Inspector] on_pts_property_changed returned error:', changeResult?.error);
+                if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                updateLiveGettersAndVisibility(panel);
+                return;
+            }
+
+            if (changeResult.values) {
+                _cachedData.__value__ = changeResult.values;
+            }
+
+            if (changeResult.dump && changeResult.dump.value) {
+                _lastDump = changeResult.dump;
+                translateDump(_lastDump.value, '');
+            }
+
+            // 1. Update top-level enumLists if modified
+            if (changeResult.enumLists && _lastDump && _lastDump.value) {
+                for (const [propName, enumList] of Object.entries(changeResult.enumLists)) {
+                    const dumpItem = _lastDump.value[propName];
+                    if (dumpItem) {
+                        dumpItem.enumList = enumList;
+                        const propEl = panel.$.view.querySelector(`.pts-basic-prop[data-key="${propName}"]`) as any;
+                        if (propEl && propEl.render) {
+                            propEl.render(dumpItem);
+                        }
+                    }
+                }
+            }
+
+            // 1b. Update array item enumLists if modified
+            if (changeResult.arrayEnumLists && _lastDump && _lastDump.value) {
+                for (const [arrKey, itemsEnumLists] of Object.entries(changeResult.arrayEnumLists)) {
+                    const arrDump = _lastDump.value[arrKey];
+                    if (arrDump && Array.isArray(arrDump.value)) {
+                        for (let i = 0; i < arrDump.value.length; i++) {
+                            const itemEnums = (itemsEnumLists as any)[i];
+                            const itemDump = arrDump.value[i];
+                            if (itemEnums && itemDump && itemDump.value) {
+                                for (const [propName, enumList] of Object.entries(itemEnums)) {
+                                    const targetSub = itemDump.value[propName];
+                                    if (targetSub) {
+                                        targetSub.enumList = enumList;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. Update backing fields (BEFORE re-rendering!)
+            const lastProp = parts[parts.length - 1];
+            const backingKey = '_' + lastProp;
+            if (parts.length === 1) {
+                if (_lastDump && _lastDump.value && _lastDump.value[backingKey]) {
+                    _lastDump.value[backingKey].value = _cachedData.__value__[backingKey];
+                    const backingEl = panel.$.view.querySelector(`.pts-basic-prop[data-key="${backingKey}"]`) as any;
+                    if (backingEl && backingEl.render) {
+                        backingEl.render(_lastDump.value[backingKey]);
+                    }
+                }
+            } else if (parts.length === 3) {
+                const [arrKey, idxStr] = parts;
+                const idx = parseInt(idxStr, 10);
+                const arrayDump = _lastDump?.value?.[arrKey];
+                if (arrayDump && arrayDump.value && arrayDump.value[idx] && arrayDump.value[idx].value) {
+                    if (arrayDump.value[idx].value[backingKey]) {
+                        const rawItem = _cachedData.__value__[arrKey]?.[idx];
+                        const itemVal = rawItem?.__value__ || rawItem;
+                        if (itemVal && itemVal[backingKey] !== undefined) {
+                            arrayDump.value[idx].value[backingKey].value = itemVal[backingKey];
+                        }
+                    }
+                }
+            }
+
+            // 3. Re-render native array ui-prop if an array or array item was modified
+            const arrayKey = parts[0];
+            const arrayDump = _lastDump?.value?.[arrayKey];
+            if (arrayDump && arrayDump.isArray) {
+                const arrayPropEl = panel.$.view.querySelector(`.pts-basic-prop[data-key="${arrayKey}"]`) as any;
+                if (arrayPropEl && arrayPropEl.render) {
+                    arrayPropEl.dump = arrayDump;
+                    arrayPropEl.render(arrayDump);
+                }
+            }
+
+            // 4. Update visibility
+            if (changeResult.visibility || changeResult.arrayVisibility) {
+                applyDumpVisibility(panel, changeResult.visibility, changeResult.arrayVisibility);
+            }
+
+            // 5. Trigger auto-save to write to disk
+            if (_currentTriggerAutoSave) {
+                _currentTriggerAutoSave();
+            }
+        } catch (e) {
+            console.error('[pTS Inspector] Error in applyPropertyChange:', e);
+            if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+            updateLiveGettersAndVisibility(panel);
+        }
+    }
+
     // Attach capture-phase listeners on view once to intercept all change/confirm/keydown/drop events
     if (!this.$.view.__pts_captured__) {
         this.$.view.__pts_captured__ = true;
 
         // 1. CHANGE event:
-        // Asset (cc-asset / ui-asset): sync dump and save immediately.
-        // Enum field: save immediately.
-        // Boolean: save immediately.
-        // Primary (cc-prop / ui-prop / ui-input / ui-num-input): SUPPRESSED! Only save on Enter key.
-        this.$.view.addEventListener('change', (e: any) => {
+        const handleChangeEvent = async (e: any) => {
             const path = e.composedPath ? e.composedPath() : [e.target];
-
-            // Array resize (.pts-array-size)
-            if (e.target && e.target.classList && e.target.classList.contains('pts-array-size')) {
-                handleArrayResize(e.target, () => {
-                    if (_currentTriggerAutoSave) _currentTriggerAutoSave();
-                });
-                return;
-            }
 
             // Asset change: save immediately
             const assetEl = findAssetElement(path);
@@ -1653,23 +2154,40 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 console.log(`[pTS Inspector] Asset change detected on <${assetEl.tagName}>`);
                 const uiAsset = (assetEl.tagName === 'UI-ASSET' ? assetEl : assetEl.querySelector('ui-asset')) as HTMLElement || assetEl;
                 syncUiAssetToDump(uiAsset, _lastDump);
-                if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                const changeInfo = resolveChangeFromEvent(e);
+                if (changeInfo) {
+                    await applyPropertyChange(panel, changeInfo.propPath, changeInfo.newValue);
+                } else if (_currentTriggerAutoSave) {
+                    _currentTriggerAutoSave();
+                }
                 return;
             }
 
-            // Enum change: save immediately
+            // Enum change: apply change immediately and invoke setter
             const enumEl = findEnumElement(path);
             if (enumEl) {
                 console.log(`[pTS Inspector] Enum change detected on <${enumEl.tagName}>`);
-                if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                const changeInfo = resolveChangeFromEvent(e);
+                if (changeInfo) {
+                    await applyPropertyChange(panel, changeInfo.propPath, changeInfo.newValue);
+                } else {
+                    if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                    updateLiveGettersAndVisibility(panel);
+                }
                 return;
             }
 
-            // Boolean toggle: save immediately
+            // Boolean toggle: apply change immediately and invoke setter
             const boolEl = findBooleanElement(path);
             if (boolEl) {
                 console.log(`[pTS Inspector] Boolean toggle detected on <${boolEl.tagName}>`);
-                if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                const changeInfo = resolveChangeFromEvent(e);
+                if (changeInfo) {
+                    await applyPropertyChange(panel, changeInfo.propPath, changeInfo.newValue);
+                } else {
+                    if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                    updateLiveGettersAndVisibility(panel);
+                }
                 return;
             }
 
@@ -1681,22 +2199,21 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             }
 
             // Fallback for any other non-primary controls
-            if (_currentTriggerAutoSave) _currentTriggerAutoSave();
-            updateLiveGettersAndVisibility(panel);
-        }, true);
+            const changeInfo = resolveChangeFromEvent(e);
+            if (changeInfo) {
+                await applyPropertyChange(panel, changeInfo.propPath, changeInfo.newValue);
+            } else {
+                if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                updateLiveGettersAndVisibility(panel);
+            }
+        };
+
+        this.$.view.addEventListener('change', handleChangeEvent, true);
+        this.$.view.addEventListener('change-dump', handleChangeEvent, true);
 
         // 2. CONFIRM event:
-        // Fired on Enter in ui-input / ui-num-input, or selection in ui-select / ui-checkbox / ui-asset
-        this.$.view.addEventListener('confirm', (e: any) => {
+        const handleConfirmEvent = async (e: any) => {
             const path = e.composedPath ? e.composedPath() : [e.target];
-
-            if (e.target && e.target.classList && e.target.classList.contains('pts-array-size')) {
-                handleArrayResize(e.target, () => {
-                    if (_currentTriggerAutoSave) _currentTriggerAutoSave();
-                    updateLiveGettersAndVisibility(panel);
-                });
-                return;
-            }
 
             const assetEl = findAssetElement(path);
             if (assetEl) {
@@ -1704,23 +2221,24 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 syncUiAssetToDump(uiAsset, _lastDump);
             }
 
-            console.log(`[pTS Inspector] Confirm event (Enter/select) -> triggering auto-save.`);
-            if (_currentTriggerAutoSave) _currentTriggerAutoSave();
-            updateLiveGettersAndVisibility(panel);
-        }, true);
+            console.log(`[pTS Inspector] Confirm event (Enter/select) -> triggering change.`);
+            const changeInfo = resolveChangeFromEvent(e);
+            if (changeInfo) {
+                await applyPropertyChange(panel, changeInfo.propPath, changeInfo.newValue);
+            } else {
+                if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                updateLiveGettersAndVisibility(panel);
+            }
+        };
+
+        this.$.view.addEventListener('confirm', handleConfirmEvent, true);
+        this.$.view.addEventListener('confirm-dump', handleConfirmEvent, true);
 
         // 3. KEYDOWN event:
         // Ensures Enter keypress triggers save for primary inputs even before blur
-        this.$.view.addEventListener('keydown', (e: KeyboardEvent) => {
+        this.$.view.addEventListener('keydown', async (e: KeyboardEvent) => {
             if (e.key === 'Enter') {
                 const path = e.composedPath ? e.composedPath() : [e.target];
-                if (e.target && (e.target as HTMLElement).classList && (e.target as HTMLElement).classList.contains('pts-array-size')) {
-                    handleArrayResize(e.target, () => {
-                        if (_currentTriggerAutoSave) _currentTriggerAutoSave();
-                        updateLiveGettersAndVisibility(panel);
-                    });
-                    return;
-                }
 
                 const assetEl = findAssetElement(path);
                 if (assetEl) {
@@ -1728,24 +2246,34 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                     syncUiAssetToDump(uiAsset, _lastDump);
                 }
 
-                console.log(`[pTS Inspector] Enter key hit on primary field -> triggering auto-save.`);
-                if (_currentTriggerAutoSave) _currentTriggerAutoSave();
-                updateLiveGettersAndVisibility(panel);
+                console.log(`[pTS Inspector] Enter key hit on primary field -> triggering change.`);
+                const changeInfo = resolveChangeFromEvent(e);
+                if (changeInfo) {
+                    await applyPropertyChange(panel, changeInfo.propPath, changeInfo.newValue);
+                } else {
+                    if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                    updateLiveGettersAndVisibility(panel);
+                }
             }
         }, true);
 
         // 4. DROP event:
         // Asset drag and drop
         this.$.view.addEventListener('drop', (e: Event) => {
-            setTimeout(() => {
+            setTimeout(async () => {
                 const path = e.composedPath ? e.composedPath() : [e.target];
                 const assetEl = findAssetElement(path);
                 if (assetEl) {
                     const uiAsset = (assetEl.tagName === 'UI-ASSET' ? assetEl : assetEl.querySelector('ui-asset')) as HTMLElement || assetEl;
                     syncUiAssetToDump(uiAsset, _lastDump);
                 }
-                if (_currentTriggerAutoSave) _currentTriggerAutoSave();
-                updateLiveGettersAndVisibility(panel);
+                const changeInfo = resolveChangeFromEvent(e);
+                if (changeInfo) {
+                    await applyPropertyChange(panel, changeInfo.propPath, changeInfo.newValue);
+                } else {
+                    if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                    updateLiveGettersAndVisibility(panel);
+                }
             }, 30);
         }, true);
     }
@@ -1865,11 +2393,15 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
 };
 
 function _format(str: string) {
+    if (!str) return '';
+    if (/^[A-Z0-9_]+$/.test(str)) {
+        return str.replace(/_/g, ' ');
+    }
     return str
-    .split(/(?=[A-Z])|_/)
-    .filter(_w => _w.length > 0)
-    .map(_w => _w.charAt(0).toUpperCase() + _w.slice(1).toLowerCase())
-    .join(' ');
+        .replace(/_/g, ' ')
+        .replace(/([a-z])([A-Z])/g, '$1 $2')
+        .replace(/^\S/, s => s.toUpperCase())
+        .trim();
 }
 
 
@@ -1891,12 +2423,21 @@ export function ready(this: PanelThis) {
     }
     setupLazyToggle(this);
 
-    // Immediate refresh on click/focus when in preview mode
-    this.$this?.addEventListener('pointerdown', () => {
+    // Immediate refresh on click/focus when in preview mode or trigger onFocusInEditor
+    const triggerFocusInEditor = () => {
         if (_isInLivePreviewMode) {
             refreshLiveState(this);
+        } else if (_currentAsset && _cachedData && _cachedData.__type__) {
+            Editor.Message.request('scene', 'execute-scene-script', {
+                name: 'pts-core',
+                method: 'on_pts_focus',
+                args: [_cachedData.__type__, collectValuesForLiveEvaluation(this), _currentAsset.uuid]
+            }).catch(() => {});
         }
-    });
+    };
+
+    this.$this?.addEventListener('pointerdown', triggerFocusInEditor);
+    this.$this?.addEventListener('focusin', triggerFocusInEditor);
 }
 
 export function close(this: PanelThis) {
