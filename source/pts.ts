@@ -1036,10 +1036,11 @@ async function renderView(this: PanelThis, dumpValue: any) {
     // 2. Generate UI containers
     this.$.view.innerHTML = _keys.reduce((_prev, _cur) => {
         const _item = dumpValue[_cur] as _TData;
+        const isHidden = _item && _item.visible === false;
         if (_item.isArray) {
             const isNodeComp = isNodeOrComponentArray(_item);
             _prev += `
-                <ui-section expand class="pts-array" data-key="${_cur}">
+                <ui-section expand class="pts-array" data-key="${_cur}" ${isHidden ? 'style="display: none"' : ''}>
                     <ui-label slot="header">${_format(_cur)} [${_item.value.length}]</ui-label>
                     <ui-prop>
                         <ui-label slot="label">Size</ui-label>
@@ -1051,7 +1052,7 @@ async function renderView(this: PanelThis, dumpValue: any) {
                 </ui-section>
             `;
         } else {
-            _prev += `<ui-prop type="dump" class="pts-basic-prop" data-key="${_cur}"></ui-prop>`;
+            _prev += `<ui-prop type="dump" class="pts-basic-prop" data-key="${_cur}" ${isHidden ? 'style="display: none"' : ''}></ui-prop>`;
         }
         return _prev;
     }, "");
@@ -1070,6 +1071,7 @@ async function renderView(this: PanelThis, dumpValue: any) {
             if (el) {
                 el.dump = _item;
                 el.render(_item);
+                el.style.display = _item && _item.visible === false ? 'none' : '';
             }
         }
     });
@@ -1078,6 +1080,9 @@ async function renderView(this: PanelThis, dumpValue: any) {
     bindUiAssetEvents(this.$.view, () => {
         if (_currentTriggerAutoSave) _currentTriggerAutoSave();
     });
+
+    // 5. Evaluate dynamic visibility and getters right after render
+    updateLiveGettersAndVisibility(this);
 
     if (this.$.jsonDisplay && _currentAsset) {
         if (_isInLivePreviewMode && _livePreviewValues) {
@@ -1200,7 +1205,173 @@ function isPrimaryInput(path: any[]): boolean {
     return false;
 }
 
+function applyDumpVisibility(panel: PanelThis, visibilityMap?: Record<string, boolean>, arrayVisibility?: Record<string, Record<string, boolean>[]>) {
+    if (!panel.$.view) return;
+    if (visibilityMap) {
+        for (const [key, isVis] of Object.entries(visibilityMap)) {
+            const el = panel.$.view.querySelector(`.pts-basic-prop[data-key="${key}"]`) as HTMLElement;
+            if (el) {
+                el.style.display = isVis ? '' : 'none';
+            }
+            const arrEl = panel.$.view.querySelector(`.pts-array[data-key="${key}"]`) as HTMLElement;
+            if (arrEl) {
+                arrEl.style.display = isVis ? '' : 'none';
+            }
+        }
+    }
+    if (arrayVisibility && _lastDump && _lastDump.value) {
+        for (const [arrayKey, itemsVis] of Object.entries(arrayVisibility)) {
+            const arrayDump = _lastDump.value[arrayKey];
+            if (!arrayDump || !Array.isArray(arrayDump.value)) continue;
+            const itemEls = panel.$.view.querySelectorAll(`.pts-array-item[data-key="${arrayKey}"]`);
+            itemEls.forEach((el: any, idx: number) => {
+                const itemVis = itemsVis[idx];
+                if (itemVis && arrayDump.value[idx] && arrayDump.value[idx].value) {
+                    let changed = false;
+                    for (const [subKey, subVis] of Object.entries(itemVis)) {
+                        const targetSub = arrayDump.value[idx].value[subKey];
+                        if (targetSub && targetSub.visible !== subVis) {
+                            targetSub.visible = subVis;
+                            changed = true;
+                        }
+                    }
+                    if (changed && el.render) {
+                        el.render(arrayDump.value[idx]);
+                    }
+                }
+            });
+        }
+    }
+}
+
+function collectValuesForLiveEvaluation(panel: PanelThis): Record<string, any> {
+    const values: Record<string, any> = Object.assign({}, _cachedData?.__value__ || {});
+    if (!panel.$.view || !_lastDump || !_lastDump.value) return values;
+
+    panel.$.view.querySelectorAll('.pts-basic-prop').forEach((el: any) => {
+        const key = el.dataset.key;
+        const dump = el.dump || (_lastDump.value && _lastDump.value[key]);
+        if (dump && key) {
+            values[key] = extractDumpValue(dump);
+        }
+    });
+
+    const arrayValues: Record<string, any[]> = {};
+    panel.$.view.querySelectorAll('.pts-array-item').forEach((el: any) => {
+        const key = el.dataset.key;
+        const index = parseInt(el.dataset.index, 10);
+        const dump = el.dump || (_lastDump.value && _lastDump.value[key]?.value?.[index]);
+        if (dump && key) {
+            if (!arrayValues[key]) arrayValues[key] = [];
+            arrayValues[key][index] = extractDumpValue(dump);
+        }
+    });
+    for (const k in arrayValues) {
+        values[k] = arrayValues[k];
+    }
+
+    return values;
+}
+
+let _isTickingInProgress = false;
+
+async function updateLiveGettersAndVisibility(panel: PanelThis) {
+    if (_isTickingInProgress || !_currentAsset || !_cachedData || !_cachedData.__type__) return;
+    _isTickingInProgress = true;
+    try {
+        const currentValues = collectValuesForLiveEvaluation(panel);
+        const result: any = await Editor.Message.request(
+            'scene',
+            'execute-scene-script',
+            {
+                name: 'pts-core',
+                method: 'evaluate_pts_live',
+                args: [_cachedData.__type__, currentValues]
+            }
+        );
+
+        if (!result || result.error) return;
+
+        // 1. Update visibility for top-level and array items
+        if (result.visibility || result.arrayVisibility) {
+            applyDumpVisibility(panel, result.visibility, result.arrayVisibility);
+        }
+
+        // 2. Update top-level getters
+        if (result.getters && panel.$.view && _lastDump && _lastDump.value) {
+            const activeEl = document.activeElement;
+            for (const [propName, getterVal] of Object.entries(result.getters)) {
+                const dumpItem = _lastDump.value[propName];
+                if (!dumpItem) continue;
+
+                const propEl = panel.$.view.querySelector(`.pts-basic-prop[data-key="${propName}"]`) as any;
+                if (!propEl) continue;
+
+                if (activeEl && propEl.contains(activeEl)) continue;
+
+                if (dumpItem.value !== getterVal) {
+                    dumpItem.value = getterVal;
+                    if (propEl.dump) propEl.dump.value = getterVal;
+
+                    const innerInput = propEl.querySelector('ui-num-input, ui-input, ui-label') as any;
+                    if (innerInput && 'value' in innerInput) {
+                        innerInput.value = getterVal;
+                    } else if (propEl.render) {
+                        propEl.render(dumpItem);
+                    }
+                }
+            }
+        }
+
+        // 3. Update array item getters
+        if (result.arrayGetters && panel.$.view && _lastDump && _lastDump.value) {
+            for (const [arrayKey, itemsGetters] of Object.entries(result.arrayGetters)) {
+                const arrayDump = _lastDump.value[arrayKey];
+                if (!arrayDump || !Array.isArray(arrayDump.value)) continue;
+                const itemEls = panel.$.view.querySelectorAll(`.pts-array-item[data-key="${arrayKey}"]`);
+                itemEls.forEach((el: any, idx: number) => {
+                    const itemGets = (itemsGetters as any)[idx];
+                    if (itemGets && arrayDump.value[idx] && arrayDump.value[idx].value) {
+                        let changed = false;
+                        for (const [gKey, gVal] of Object.entries(itemGets)) {
+                            const targetSub = arrayDump.value[idx].value[gKey];
+                            if (targetSub && targetSub.value !== gVal) {
+                                targetSub.value = gVal;
+                                changed = true;
+                            }
+                        }
+                        if (changed && el.render) {
+                            el.render(arrayDump.value[idx]);
+                        }
+                    }
+                });
+            }
+        }
+    } catch (e) {
+    } finally {
+        _isTickingInProgress = false;
+    }
+}
+
+let _inspectorTickTimer: any = null;
+
+function startInspectorTicking(panel: PanelThis) {
+    stopInspectorTicking();
+    _inspectorTickTimer = setInterval(() => {
+        if (_isInLivePreviewMode) return;
+        updateLiveGettersAndVisibility(panel);
+    }, 200);
+}
+
+function stopInspectorTicking() {
+    if (_inspectorTickTimer) {
+        clearInterval(_inspectorTickTimer);
+        _inspectorTickTimer = null;
+    }
+}
+
 export async function update(this: PanelThis, assetList: AssetInfo[], metaList: Meta[]) {
+    const panel = this;
     this.assetList = assetList;
     this.metaList = metaList;
 
@@ -1286,9 +1457,11 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
     setPreviewModeUI(this, isPreview, foundInstance);
 
     if (isPreview) {
+        stopInspectorTicking();
         startPreviewPolling(this);
     } else {
         stopPreviewPolling();
+        startInspectorTicking(this);
     }
 
     Editor.Message.request(
@@ -1297,7 +1470,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         {
             name: 'pts-core',
             method: 'dump',
-            args: [_cachedData.__type__]
+            args: [_cachedData.__type__, _cachedData.__value__]
         }
     ).then((_out: any) => {
         console.log("DUMPER OUT: ", _out);
@@ -1349,6 +1522,10 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             const dump = el.dump || (_lastDump?.value && _lastDump.value[key]);
             if (dump) {
                 const propName = dump.name || key;
+                const getterInfo = _lastDump?.__getters__?.[propName];
+                if (getterInfo && getterInfo.readonly) {
+                    return;
+                }
                 _cachedData.__value__[propName] = extractDumpValue(dump);
             }
         });
@@ -1376,12 +1553,23 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             _cachedData.__value__[key] = arrayValues[key];
         }
 
-        // Preserve any properties from _lastDump.value not captured in DOM
+        // Preserve any properties from _lastDump.value not captured in DOM (excluding readonly getters)
         if (_lastDump && _lastDump.value) {
             for (const key of Object.keys(_lastDump.value)) {
                 if (_ignores.includes(key)) continue;
+                const getterInfo = _lastDump?.__getters__?.[key];
+                if (getterInfo && getterInfo.readonly) continue;
                 if (!(_cachedData.__value__.hasOwnProperty(key))) {
                     _cachedData.__value__[key] = extractDumpValue(_lastDump.value[key]);
+                }
+            }
+        }
+
+        // Strip any readonly getters that may have been previously saved in __value__
+        if (_lastDump && _lastDump.__getters__) {
+            for (const g in _lastDump.__getters__) {
+                if (_lastDump.__getters__[g].readonly) {
+                    delete _cachedData.__value__[g];
                 }
             }
         }
@@ -1494,6 +1682,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
 
             // Fallback for any other non-primary controls
             if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+            updateLiveGettersAndVisibility(panel);
         }, true);
 
         // 2. CONFIRM event:
@@ -1504,6 +1693,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             if (e.target && e.target.classList && e.target.classList.contains('pts-array-size')) {
                 handleArrayResize(e.target, () => {
                     if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                    updateLiveGettersAndVisibility(panel);
                 });
                 return;
             }
@@ -1516,6 +1706,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
 
             console.log(`[pTS Inspector] Confirm event (Enter/select) -> triggering auto-save.`);
             if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+            updateLiveGettersAndVisibility(panel);
         }, true);
 
         // 3. KEYDOWN event:
@@ -1526,6 +1717,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 if (e.target && (e.target as HTMLElement).classList && (e.target as HTMLElement).classList.contains('pts-array-size')) {
                     handleArrayResize(e.target, () => {
                         if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                        updateLiveGettersAndVisibility(panel);
                     });
                     return;
                 }
@@ -1538,6 +1730,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
 
                 console.log(`[pTS Inspector] Enter key hit on primary field -> triggering auto-save.`);
                 if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                updateLiveGettersAndVisibility(panel);
             }
         }, true);
 
@@ -1552,6 +1745,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                     syncUiAssetToDump(uiAsset, _lastDump);
                 }
                 if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                updateLiveGettersAndVisibility(panel);
             }, 30);
         }, true);
     }
@@ -1707,5 +1901,6 @@ export function ready(this: PanelThis) {
 
 export function close(this: PanelThis) {
     stopPreviewPolling();
+    stopInspectorTicking();
     _isInLivePreviewMode = false;
 }

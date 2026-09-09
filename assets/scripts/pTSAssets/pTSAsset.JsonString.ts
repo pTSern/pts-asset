@@ -13,7 +13,7 @@ export class pTSAsset_JsonString extends pTSAsset_Data<pFlex.TJsonString, object
     data: string = "{}";
 
     protected _clone(value: string) {
-        console.log("pTSAsset_JsonString._clone", value,"\n\n", this.data);
+        console.log("[x8] pTSAsset_JsonString._clone", value,"\n\n", this.data);
         if(typeof value === 'string') return JSON.parse(value);
         else return value;
     }
