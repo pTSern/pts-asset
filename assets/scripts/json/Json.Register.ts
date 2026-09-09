@@ -573,6 +573,41 @@ function _resolveGradient(data: any): Gradient {
 }
 
 // ─── 8. Recursive Value Resolver ───
+function _getPropDescriptor(target: any, key: string): PropertyDescriptor | undefined {
+    let curr = target;
+    while (curr && curr !== Object.prototype) {
+        const desc = Object.getOwnPropertyDescriptor(curr, key);
+        if (desc) return desc;
+        curr = Object.getPrototypeOf(curr);
+    }
+    return undefined;
+}
+
+function _assignPropSafely(target: any, key: string, value: any): void {
+    if (!target || typeof target !== 'object') return;
+    const desc = _getPropDescriptor(target, key);
+    if (desc && typeof desc.get === 'function' && !desc.set) {
+        // Getter-only: NEVER write to target[key] (throws TypeError in strict mode)
+        const backingKey = '_' + key;
+        if (backingKey in target) {
+            try {
+                target[backingKey] = value;
+            } catch {}
+        }
+        return;
+    }
+    try {
+        target[key] = value;
+    } catch {
+        const backingKey = '_' + key;
+        if (backingKey in target) {
+            try {
+                target[backingKey] = value;
+            } catch {}
+        }
+    }
+}
+
 function _resolveValue(val: any, expectedCtor?: any, target?: any, propKey?: string, depsOut?: Promise<any>[]): any {
     if (val === null || val === undefined) return val;
     if (typeof val !== 'object') return val;
@@ -667,9 +702,17 @@ function _resolveValue(val: any, expectedCtor?: any, target?: any, propKey?: str
         const instance = new cls();
         const vMap = (__value__ && typeof __value__ === 'object') ? __value__ : {};
         const subProps = pEngine?.NodeUtils?.getAttr ? pEngine.NodeUtils.getAttr(cls) : null;
-        for (const k in vMap) {
+        const vKeys = Object.keys(vMap).sort((a, b) => {
+            const aUnder = a.startsWith('_');
+            const bUnder = b.startsWith('_');
+            if (aUnder && !bUnder) return -1;
+            if (!aUnder && bUnder) return 1;
+            return 0;
+        });
+        for (const k of vKeys) {
             const subCtor = subProps?.[k]?.ctor;
-            instance[k] = _resolveValue(vMap[k], subCtor, instance, k, depsOut);
+            const resolved = _resolveValue(vMap[k], subCtor, instance, k, depsOut);
+            _assignPropSafely(instance, k, resolved);
         }
 
         // Apply defaults for missing properties
@@ -677,7 +720,8 @@ function _resolveValue(val: any, expectedCtor?: any, target?: any, propKey?: str
             for (const k in subProps) {
                 if (!(k in vMap)) {
                     const def = subProps[k]?.default;
-                    instance[k] = typeof def === 'function' ? def() : def;
+                    const defVal = typeof def === 'function' ? def() : def;
+                    _assignPropSafely(instance, k, defVal);
                 }
             }
         }
@@ -691,15 +735,24 @@ function _resolveValue(val: any, expectedCtor?: any, target?: any, propKey?: str
         try {
             const instance = new expectedCtor();
             const subProps = pEngine?.NodeUtils?.getAttr ? pEngine.NodeUtils.getAttr(expectedCtor) : null;
-            for (const k in val) {
+            const valKeys = Object.keys(val).sort((a, b) => {
+                const aUnder = a.startsWith('_');
+                const bUnder = b.startsWith('_');
+                if (aUnder && !bUnder) return -1;
+                if (!aUnder && bUnder) return 1;
+                return 0;
+            });
+            for (const k of valKeys) {
                 const subCtor = subProps?.[k]?.ctor;
-                instance[k] = _resolveValue(val[k], subCtor, instance, k, depsOut);
+                const resolved = _resolveValue(val[k], subCtor, instance, k, depsOut);
+                _assignPropSafely(instance, k, resolved);
             }
             if (subProps) {
                 for (const k in subProps) {
                     if (!(k in val)) {
                         const def = subProps[k]?.default;
-                        instance[k] = typeof def === 'function' ? def() : def;
+                        const defVal = typeof def === 'function' ? def() : def;
+                        _assignPropSafely(instance, k, defVal);
                     }
                 }
             }
@@ -717,15 +770,6 @@ function _resolveValue(val: any, expectedCtor?: any, target?: any, propKey?: str
 }
 
 // ─── 7. Hydrate Asset ───
-function _getPropDescriptor(target: any, key: string): PropertyDescriptor | undefined {
-    let curr = target;
-    while (curr && curr !== Object.prototype) {
-        const desc = Object.getOwnPropertyDescriptor(curr, key);
-        if (desc) return desc;
-        curr = Object.getPrototypeOf(curr);
-    }
-    return undefined;
-}
 
 function _hydrate(asset: Asset, ptsJson: any): void {
     if (!asset || !ptsJson) return;
@@ -895,12 +939,13 @@ function _hydrate(asset: Asset, ptsJson: any): void {
                         if (isArray && (resolved === undefined || resolved === null)) {
                             resolved = [];
                         }
-                        (asset as any)[_key] = resolved;
+                        _assignPropSafely(asset, _key, resolved);
                     } else {
-                        (asset as any)[_key] = _resolveValue(rawVal, propCtor, asset, _key, depsPromises);
-                        if (isArray && ((asset as any)[_key] === undefined || (asset as any)[_key] === null)) {
-                            (asset as any)[_key] = [];
+                        let resolved = _resolveValue(rawVal, propCtor, asset, _key, depsPromises);
+                        if (isArray && (resolved === undefined || resolved === null)) {
+                            resolved = [];
                         }
+                        _assignPropSafely(asset, _key, resolved);
                     }
                 }
             }
@@ -917,7 +962,7 @@ function _hydrate(asset: Asset, ptsJson: any): void {
                         }
                         continue;
                     }
-                    (asset as any)[_key] = _resolveValue(__value__[_key], undefined, asset, _key, depsPromises);
+                    _assignPropSafely(asset, _key, _resolveValue(__value__[_key], undefined, asset, _key, depsPromises));
                 }
             }
 
