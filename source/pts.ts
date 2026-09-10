@@ -623,6 +623,30 @@ function populateDumpWithSaved(dump: any, savedVal: any) {
         return;
     }
 
+    // 5b. Recover "Unknown" or missing dump type if saved value is an asset reference
+    if (dump.type === 'Unknown' || !dump.type) {
+        let uuid = "";
+        let typeName = "";
+        if (typeof savedVal === 'string' && (savedVal.includes('-') || savedVal.includes('@'))) {
+            uuid = savedVal;
+        } else if (savedVal && typeof savedVal === 'object') {
+            typeName = savedVal.__type__ || "";
+            if (savedVal.__value__ && typeof savedVal.__value__ === 'object' && savedVal.__value__.uuid) {
+                uuid = savedVal.__value__.uuid;
+            } else if (typeof savedVal.__value__ === 'string') {
+                uuid = savedVal.__value__;
+            } else if (savedVal.uuid) {
+                uuid = savedVal.uuid;
+            }
+        }
+        if (uuid || (typeName && (typeName.startsWith('pTSAsset') || typeName.includes('Asset')))) {
+            dump.type = typeName || 'cc.Asset';
+            dump.extends = ['cc.Asset', 'pTSAsset', typeName].filter(Boolean);
+            dump.value = { uuid: uuid || "" };
+            return;
+        }
+    }
+
     // 6. Primitives (Number, String, Boolean, Enum)
     if (typeof vData !== 'undefined' && vData !== null) {
         dump.value = vData;
@@ -931,6 +955,13 @@ function resolveDumpForUiAsset(uiAsset: HTMLElement, rootDump: any = _lastDump):
         if (key) {
             const propDump = rootDump.value[key];
             if (propDump) {
+                if (propDump.isArray && Array.isArray(propDump.value)) {
+                    const allAssets = Array.from(basicProp.querySelectorAll('ui-asset'));
+                    const idx = allAssets.indexOf(uiAsset);
+                    if (idx >= 0 && propDump.value[idx]) {
+                        return propDump.value[idx];
+                    }
+                }
                 if (isAssetType(propDump)) return propDump;
                 if (propDump.value && typeof propDump.value === 'object') {
                     return resolveFieldInStruct(uiAsset, basicProp, propDump);
@@ -1238,6 +1269,21 @@ async function renderView(this: PanelThis, dumpValue: any) {
     bindUiAssetEvents(this.$.view, () => {
         if (_currentTriggerAutoSave) _currentTriggerAutoSave();
     });
+
+    if (!(this.$.view as any).__pts_delegated__) {
+        (this.$.view as any).__pts_delegated__ = true;
+        const handleAssetChange = (e: Event) => {
+            const target = (e.composedPath ? e.composedPath()[0] : e.target) as HTMLElement;
+            const assetEl = target?.closest('ui-asset') as HTMLElement;
+            if (assetEl) {
+                console.log(`[pTS Inspector] Delegated ui-asset event (${e.type}), new value:`, (assetEl as any).value);
+                syncUiAssetToDump(assetEl, _lastDump);
+                if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+            }
+        };
+        this.$.view.addEventListener('change', handleAssetChange, true);
+        this.$.view.addEventListener('confirm', handleAssetChange, true);
+    }
 
     // 6. Update group visibility based on child property visibility
     updateGroupSectionVisibility(this);
@@ -1889,6 +1935,16 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             if (el && el.tagName === 'UI-PROP' && (el as any).dump && (el as any).dump.path) {
                 const dump = (el as any).dump;
                 if (dump.isArray) {
+                    // If the event came from an asset element inside this array, route to specific index
+                    if (assetEl) {
+                        const uiAsset = (assetEl.tagName === 'UI-ASSET' ? assetEl : assetEl.querySelector('ui-asset')) as HTMLElement || assetEl;
+                        const allAssets = Array.from(el.querySelectorAll('ui-asset'));
+                        const idx = allAssets.indexOf(uiAsset);
+                        if (idx >= 0) {
+                            return { propPath: `${dump.path}.${idx}`, newValue };
+                        }
+                    }
+
                     const targetVal = (target as any)?.value;
                     const parsed = typeof targetVal === 'number' ? targetVal : parseInt(targetVal, 10);
                     if (typeof parsed === 'number' && !isNaN(parsed) && parsed >= 0) {
@@ -2010,6 +2066,23 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             }
 
             if (changeResult.dump && changeResult.dump.value) {
+                if (_lastDump && _lastDump.value) {
+                    for (const k of Object.keys(_lastDump.value)) {
+                        const oldProp = _lastDump.value[k];
+                        const newProp = changeResult.dump.value[k];
+                        if (oldProp?.isArray && Array.isArray(oldProp.value) && newProp?.isArray && Array.isArray(newProp.value)) {
+                            for (let i = 0; i < oldProp.value.length; i++) {
+                                const oldItem = oldProp.value[i];
+                                const newItem = newProp.value[i];
+                                if (oldItem?.value?.uuid && (!newItem?.value || !newItem.value.uuid)) {
+                                    if (newItem) {
+                                        newItem.value = { uuid: oldItem.value.uuid };
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 _lastDump = changeResult.dump;
                 translateDump(_lastDump.value, '');
             }

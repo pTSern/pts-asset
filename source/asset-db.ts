@@ -150,6 +150,55 @@ export function load() {
                 };
                 console.log('[pts-asset:asset-db] Hooked Manager.assetManager.queryAssetInfo');
             }
+
+            if (typeof am.queryAssets === 'function') {
+                const origQueryAssets = am.queryAssets;
+                am.queryAssets = function(options?: any, dataKeys?: any) {
+                    let results = origQueryAssets.call(am, options, dataKeys);
+                    if (!Array.isArray(results)) results = [];
+
+                    const requestedTypes: string[] = [];
+                    if (options) {
+                        if (options.ccType) {
+                            if (Array.isArray(options.ccType)) requestedTypes.push(...options.ccType);
+                            else if (typeof options.ccType === 'string') requestedTypes.push(options.ccType);
+                        }
+                        if (options.type) {
+                            if (Array.isArray(options.type)) requestedTypes.push(...options.type);
+                            else if (typeof options.type === 'string') requestedTypes.push(options.type);
+                        }
+                    }
+
+                    if (requestedTypes.length > 0) {
+                        const ptsQueryOpts: any = { extname: ['.pts'] };
+                        if (options.pattern) ptsQueryOpts.pattern = options.pattern;
+                        const allPts = origQueryAssets.call(am, ptsQueryOpts, dataKeys) || [];
+                        const existingUuids = new Set(results.map((r: any) => r && r.uuid));
+
+                        for (const ptsAsset of allPts) {
+                            if (!ptsAsset || existingUuids.has(ptsAsset.uuid)) continue;
+                            _enrichInfo(ptsAsset);
+                            const matches = requestedTypes.some(req => {
+                                if (!req) return false;
+                                if (ptsAsset.type === req) return true;
+                                if (Array.isArray(ptsAsset.extends) && ptsAsset.extends.includes(req)) return true;
+                                return false;
+                            });
+                            if (matches) {
+                                existingUuids.add(ptsAsset.uuid);
+                                results.push(ptsAsset);
+                            }
+                        }
+                    } else {
+                        for (const item of results) {
+                            _enrichInfo(item);
+                        }
+                    }
+
+                    return results;
+                };
+                console.log('[pts-asset:asset-db] Hooked Manager.assetManager.queryAssets');
+            }
             _installed = true;
         }
     } catch (err) {
