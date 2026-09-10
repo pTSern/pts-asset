@@ -29,16 +29,6 @@ ui-drag-item[pts-item="true"] .icon ui-asset-image > *,
 ui-asset-image[importer="pts"] > * {
     opacity: 0 !important;
 }
-
-/* Hide redundant engine preview panels when custom pTS inspector is rendered */
-.content-section:has(ui-panel[src*="pts.js"]) > ui-panel:not([src*="pts.js"]),
-ui-panel[src*="pts.js"] ~ ui-panel {
-    display: none !important;
-}
-.content-section:has(ui-panel[src*="pts.js"]) > ui-panel[src*="pts.js"] {
-    flex: 1 !important;
-    min-height: 0 !important;
-}
 `;
 
 function injectCss() {

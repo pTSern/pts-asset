@@ -1625,86 +1625,6 @@ function stopInspectorTicking() {
     }
 }
 
-let _siblingObserver: MutationObserver | null = null;
-
-function suppressSiblingPanels(panel: PanelThis) {
-    try {
-        const parent = panel.$this?.parentElement;
-        if (!parent) return;
-
-        // Mark container and panel for CSS targeting
-        parent.setAttribute('has-pts-inspector', 'true');
-        panel.$this.setAttribute('pts-inspector', 'true');
-
-        // 1. Direct style suppression on any sibling ui-panel
-        const panels = parent.querySelectorAll('ui-panel');
-        panels.forEach((p: Element) => {
-            if (p !== panel.$this) {
-                (p as HTMLElement).style.setProperty('display', 'none', 'important');
-            }
-        });
-
-        // 2. Inject scoped style into inspector's shadow root / container
-        const root = (panel.$this.getRootNode ? panel.$this.getRootNode() : null) as (Document | ShadowRoot | null);
-        if (root && !root.querySelector('#pts-hide-sibling-panels')) {
-            const style = document.createElement('style');
-            style.id = 'pts-hide-sibling-panels';
-            style.textContent = `
-                [has-pts-inspector="true"] > ui-panel:not([pts-inspector="true"]),
-                .content-section:has(ui-panel[src*="pts.js"]) > ui-panel:not([src*="pts.js"]),
-                ui-panel[src*="pts.js"] ~ ui-panel {
-                    display: none !important;
-                }
-                .content-section:has(ui-panel[src*="pts.js"]) > ui-panel[src*="pts.js"],
-                [has-pts-inspector="true"] > ui-panel[pts-inspector="true"] {
-                    flex: 1 !important;
-                    min-height: 0 !important;
-                }
-            `;
-            root.appendChild(style);
-        }
-    } catch (e) {
-        console.warn('[pTS Inspector] Failed to suppress sibling panels:', e);
-    }
-}
-
-function setupSiblingSuppression(panel: PanelThis) {
-    suppressSiblingPanels(panel);
-
-    const parent = panel.$this?.parentElement;
-    if (!parent) return;
-
-    if (!_siblingObserver && typeof MutationObserver !== 'undefined') {
-        _siblingObserver = new MutationObserver(() => {
-            suppressSiblingPanels(panel);
-        });
-        _siblingObserver.observe(parent, { childList: true, subtree: false });
-    }
-
-    setTimeout(() => suppressSiblingPanels(panel), 50);
-    setTimeout(() => suppressSiblingPanels(panel), 200);
-}
-
-function cleanupSiblingSuppression(panel: PanelThis) {
-    if (_siblingObserver) {
-        _siblingObserver.disconnect();
-        _siblingObserver = null;
-    }
-    try {
-        const parent = panel.$this?.parentElement;
-        if (parent) {
-            parent.removeAttribute('has-pts-inspector');
-        }
-        const root = (panel.$this?.getRootNode ? panel.$this.getRootNode() : null) as (Document | ShadowRoot | null);
-        if (root) {
-            const style = root.querySelector('#pts-hide-sibling-panels');
-            if (style) {
-                style.remove();
-            }
-        }
-    } catch (e) {}
-}
-
 export async function update(this: PanelThis, assetList: AssetInfo[], metaList: Meta[]) {
     const panel = this;
     this.assetList = assetList;
@@ -1712,18 +1632,6 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
 
     if(!this.metaList || this.assetList.length === 0) return;
 
-    const newAsset = this.assetList[0];
-    const isPtsAsset = !!(newAsset && newAsset.file && newAsset.file.endsWith('.pts'));
-    if (!isPtsAsset) {
-        this.$this.style.display = 'none';
-        return;
-    }
-    this.$this.style.display = 'flex';
-    this.$this.style.order = '-1';
-    this.$this.style.flex = '1';
-    this.$this.style.minHeight = '0';
-
-    setupSiblingSuppression(this);
     setupLazyToggle(this);
 
     _isUpdatingUi = true;
@@ -1737,6 +1645,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         _isUpdatingUi = false;
     }
 
+    const newAsset = this.assetList[0];
     if (_currentAsset && _currentAsset.uuid === newAsset.uuid && _lastDump) {
         console.log("[Inspector] Same asset, skipping re-render.");
         console.groupEnd();
@@ -1755,6 +1664,8 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
     if (this.$.ptsa) {
         this.$.ptsa.value = _cachedData.__type__ || "";
     }
+
+    this.$this.style.order = '-1';
 
     // Trigger onFocusInEditor hook in scene script when asset is focused in Inspector
     if (_cachedData && _cachedData.__type__) {
@@ -2519,7 +2430,6 @@ export function onChange(...ayny: any[]) {
 }
 
 export function ready(this: PanelThis) {
-    setupSiblingSuppression(this);
     if (this.$.jsonToggle) {
         this.$.jsonToggle.addEventListener('change', () => {
             if (this.$.jsonDisplay) {
@@ -2551,7 +2461,6 @@ export function ready(this: PanelThis) {
 }
 
 export function close(this: PanelThis) {
-    cleanupSiblingSuppression(this);
     stopPreviewPolling();
     stopInspectorTicking();
     _isInLivePreviewMode = false;
