@@ -110,6 +110,8 @@ export const methods: { [key: string]: (...any: any) => any } = {
     async reload() {
         console.log('[pts-asset] Reloading extension cache and hooks...');
         _ptsTypeCache.clear();
+        _installIpcHook();
+        _hookAssetDbRequireCache();
         _installMessageHook();
     },
     async onSelectionSelect(type: string, uuid: string) {
@@ -498,6 +500,205 @@ function _enrichPtsAssetInfo(info: any) {
     }
 }
 
+async function _filterAndEnrichQueryAssets(result: any[], options?: any): Promise<any[]> {
+    if (!Array.isArray(result)) return result;
+
+    // 1. Enrich any .pts items already present in result
+    for (const item of result) {
+        if (item) _enrichPtsAssetInfo(item);
+    }
+
+    // 2. Extract requested types from options
+    const requestedTypes: string[] = [];
+    if (options) {
+        if (options.ccType) {
+            if (Array.isArray(options.ccType)) requestedTypes.push(...options.ccType);
+            else if (typeof options.ccType === 'string') requestedTypes.push(options.ccType);
+        }
+        if (options.type) {
+            if (Array.isArray(options.type)) requestedTypes.push(...options.type);
+            else if (typeof options.type === 'string') requestedTypes.push(options.type);
+        }
+    }
+
+    // 3. If specific types were requested (e.g. 'GamePlay_Match_pConfig')
+    if (requestedTypes.length > 0) {
+        try {
+            const projectPath = (typeof Editor !== 'undefined' && Editor.Project && Editor.Project.path) ? Editor.Project.path : process.cwd();
+            const searchDirs = [
+                path.join(projectPath, 'assets'),
+                path.join(projectPath, 'extensions/pts-asset/assets')
+            ];
+            const allPtsFiles: string[] = [];
+
+            const scan = (dir: string) => {
+                if (!fs.existsSync(dir)) return;
+                const entries = fs.readdirSync(dir, { withFileTypes: true });
+                for (const e of entries) {
+                    if (e.name === 'node_modules' || e.name === '.git') continue;
+                    const full = path.join(dir, e.name);
+                    if (e.isDirectory()) scan(full);
+                    else if (e.isFile() && e.name.endsWith('.pts')) allPtsFiles.push(full);
+                }
+            };
+            for (const d of searchDirs) scan(d);
+
+            const existingUuids = new Set(result.map((r: any) => r && r.uuid));
+
+            for (const ptsFile of allPtsFiles) {
+                const typeInfo = getPtsTypeInfo(ptsFile);
+                if (!typeInfo) continue;
+
+                // Check if matches requested type or extends it
+                const matches = requestedTypes.some(req => {
+                    if (!req || req === 'all' || req === 'cc.Asset') return true;
+                    if (typeInfo.type === req) return true;
+                    if (Array.isArray(typeInfo.extends) && typeInfo.extends.includes(req)) return true;
+                    return false;
+                });
+
+                if (matches) {
+                    const metaFile = `${ptsFile}.meta`;
+                    let uuid = '';
+                    if (fs.existsSync(metaFile)) {
+                        try {
+                            const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+                            uuid = meta.uuid || '';
+                        } catch {}
+                    }
+                    if (!uuid || existingUuids.has(uuid)) continue;
+
+                    existingUuids.add(uuid);
+                    const relPath = path.relative(projectPath, ptsFile).replace(/\\/g, '/');
+                    const url = `db://${relPath}`;
+                    const assetName = path.basename(ptsFile, '.pts');
+
+                    result.push({
+                        uuid,
+                        path: ptsFile,
+                        file: ptsFile,
+                        url,
+                        name: assetName,
+                        displayName: path.basename(ptsFile),
+                        type: typeInfo.type,
+                        extends: typeInfo.extends,
+                        imported: true,
+                        invalid: false,
+                        visible: true,
+                        readonly: false
+                    });
+                    console.log(`[pts-asset] Injected matching .pts asset for ${requestedTypes.join(',')}: ${assetName} (${typeInfo.type})`);
+                }
+            }
+        } catch (scanErr) {
+            console.error('[pts-asset] Error scanning .pts assets for query:', scanErr);
+        }
+    }
+
+    return result;
+}
+
+let _installedIpcHooks = new Map<string, Function>();
+
+function _installIpcHook() {
+    try {
+        const { ipcMain } = require('electron');
+        if (!ipcMain || !ipcMain._invokeHandlers) return;
+
+        for (const [channel, originalHandler] of ipcMain._invokeHandlers.entries()) {
+            if (_installedIpcHooks.has(channel)) continue;
+
+            const wrappedHandler = async function(event: any, ...args: any[]) {
+                let result = await originalHandler.call(ipcMain, event, ...args);
+
+                try {
+                    let pkg = '';
+                    let msg = '';
+                    let opts: any = null;
+
+                    if (typeof args[0] === 'string' && typeof args[1] === 'string') {
+                        pkg = args[0];
+                        msg = args[1];
+                        opts = args[2];
+                    } else if (args[0] && typeof args[0] === 'object') {
+                        pkg = args[0].pkg || args[0].package || '';
+                        msg = args[0].msg || args[0].message || '';
+                        opts = args[0].data || args[0].options || args[1];
+                    }
+
+                    if (pkg === 'asset-db') {
+                        if (msg === 'query-assets' && Array.isArray(result)) {
+                            result = await _filterAndEnrichQueryAssets(result, opts);
+                        } else if (msg === 'query-asset-info' && result) {
+                            _enrichPtsAssetInfo(result);
+                        }
+                    }
+                } catch (e) {
+                    console.error('[pts-asset] Error in IPC message hook:', e);
+                }
+
+                return result;
+            };
+
+            _installedIpcHooks.set(channel, originalHandler);
+            ipcMain._invokeHandlers.set(channel, wrappedHandler);
+            console.log(`[pts-asset] Hooked ipcMain invoke channel: ${channel}`);
+        }
+    } catch (err) {
+        console.error('[pts-asset] Failed to install ipcMain hook:', err);
+    }
+}
+
+function _uninstallIpcHook() {
+    try {
+        const { ipcMain } = require('electron');
+        if (!ipcMain || !ipcMain._invokeHandlers) return;
+        for (const [channel, orig] of _installedIpcHooks.entries()) {
+            ipcMain._invokeHandlers.set(channel, orig);
+        }
+        _installedIpcHooks.clear();
+        console.log('[pts-asset] Uninstalled ipcMain hooks');
+    } catch {}
+}
+
+function _hookAssetDbRequireCache() {
+    try {
+        for (const modPath of Object.keys(require.cache)) {
+            if (modPath.includes('asset-db') && (modPath.includes('browser') || modPath.includes('dist'))) {
+                const mod = require.cache[modPath];
+                if (!mod || !mod.exports) continue;
+
+                const target = mod.exports.methods || mod.exports;
+                if (target && typeof target.queryAssets === 'function' && !target.queryAssets.__pts_hooked__) {
+                    const origQueryAssets = target.queryAssets;
+                    const wrappedQueryAssets = async function(options?: any, ...rest: any[]) {
+                        let result = await origQueryAssets.call(target, options, ...rest);
+                        if (Array.isArray(result)) {
+                            result = await _filterAndEnrichQueryAssets(result, options);
+                        }
+                        return result;
+                    };
+                    wrappedQueryAssets.__pts_hooked__ = true;
+                    target.queryAssets = wrappedQueryAssets;
+                    console.log('[pts-asset] Hooked asset-db queryAssets in require.cache');
+                }
+
+                if (target && typeof target.queryAssetInfo === 'function' && !target.queryAssetInfo.__pts_hooked__) {
+                    const origQueryInfo = target.queryAssetInfo;
+                    const wrappedQueryInfo = async function(...args: any[]) {
+                        const result = await origQueryInfo.call(target, ...args);
+                        if (result) _enrichPtsAssetInfo(result);
+                        return result;
+                    };
+                    wrappedQueryInfo.__pts_hooked__ = true;
+                    target.queryAssetInfo = wrappedQueryInfo;
+                    console.log('[pts-asset] Hooked asset-db queryAssetInfo in require.cache');
+                }
+            }
+        }
+    } catch (err) {}
+}
+
 let _originalRequest: any = null;
 
 function _installMessageHook() {
@@ -506,32 +707,18 @@ function _installMessageHook() {
 
     _originalRequest = Editor.Message.request;
     (Editor.Message as any).request = async function(pkg: any, message: any, ...args: any[]) {
-        const result = await _originalRequest.apply(Editor.Message, [pkg, message, ...args]);
+        let result = await _originalRequest.apply(Editor.Message, [pkg, message, ...args]);
 
         if (pkg === 'asset-db') {
-            if (!result) {
-                console.warn(`[MSG HOOK] ⚠️ asset-db:${message}(${JSON.stringify(args)}) returned null/undefined`);
-            } else if (Array.isArray(result)) {
-                const nullIdx = [];
-                for (let i = 0; i < result.length; i++) {
-                    if (!result[i]) nullIdx.push(i);
-                }
-                if (nullIdx.length > 0) {
-                    console.error(`[MSG HOOK] 🚨 asset-db:${message} returned array with null/undefined at indices:`, nullIdx);
-                }
-            }
-
             if (message === 'query-asset-info' && result) {
                 _enrichPtsAssetInfo(result);
             } else if (message === 'query-assets' && Array.isArray(result)) {
-                for (const item of result) {
-                    _enrichPtsAssetInfo(item);
-                }
+                result = await _filterAndEnrichQueryAssets(result, args[0]);
             }
         }
         return result;
     };
-    console.log('[pts-asset] Installed Editor.Message.request hook with diagnostic logging');
+    console.log('[pts-asset] Installed Editor.Message.request hook');
 }
 
 function _uninstallMessageHook() {
@@ -548,6 +735,8 @@ function _uninstallMessageHook() {
  */
 export async function load() {
     checkPtsCoreDependency(false);
+    _installIpcHook();
+    _hookAssetDbRequireCache();
     _installMessageHook();
 
     try {
@@ -575,6 +764,7 @@ export async function load() {
  * @zh 卸载扩展时触发的方法
  */
 export function unload() {
+    _uninstallIpcHook();
     _uninstallMessageHook();
     _ptsTypeCache.clear();
     clearInheritanceCache();
