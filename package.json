@@ -12,6 +12,7 @@
     },
     "description": "i18n:pts-asset.description",
     "main": "./bootstrap.js",
+    "windows": "./dist/windows.js",
     "devDependencies": {
         "@cocos/creator-types": "^3.8.0",
         "@types/fs-extra": "^11.0.4",
@@ -56,7 +57,7 @@
                 {
                     "type": "pts",
                     "extends": "cc.Asset",
-                    "icon": "db://pts-asset/static/box.png"
+                    "icon": "packages://pts-asset/static/pts.png"
                 }
             ],
             "drop": [
@@ -69,7 +70,8 @@
         "inspector": {
             "section": {
                 "asset": {
-                    "*": "./dist/pts.js"
+                    "*": "./dist/pts.js",
+                    "pts": "./dist/pts.js"
                 },
                 "node": {
                     "Smart_JsonAsset": "./dist/smart_ja.js"

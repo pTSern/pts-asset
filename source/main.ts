@@ -477,6 +477,21 @@ export function invalidatePtsCache(key?: string): void {
     }
 }
 
+const _ptsUuids = new Set<string>();
+
+function _isPtsUuid(uuid: string): boolean {
+    if (!uuid || typeof uuid !== 'string') return false;
+    if (_ptsUuids.has(uuid)) return true;
+    if (_ptsTypeCache.has(uuid)) return true;
+    if (uuid.endsWith('.pts') || uuid.endsWith('.pts.meta')) return true;
+    const typeInfo = getPtsTypeInfo(uuid);
+    if (typeInfo) {
+        _ptsUuids.add(uuid);
+        return true;
+    }
+    return false;
+}
+
 function _enrichPtsAssetInfo(info: any) {
     if (!info) return;
     const file = info.file || info.path;
@@ -488,7 +503,18 @@ function _enrichPtsAssetInfo(info: any) {
     }
     if (typeInfo) {
         info.type = typeInfo.type;
-        info.extends = typeInfo.extends;
+        const extendsList = Array.isArray(typeInfo.extends) ? [...typeInfo.extends] : [];
+        if (!extendsList.includes('pts')) extendsList.push('pts');
+        if (!extendsList.includes('cc.Asset')) extendsList.push('cc.Asset');
+        info.extends = extendsList;
+        info.icon = 'packages://pts-asset/static/pts.png';
+        info.iconInfo = {
+            type: 'image',
+            value: 'packages://pts-asset/static/pts.png'
+        };
+        if (!info.importer || info.importer === '*') {
+            info.importer = 'pts';
+        }
         if (typeInfo.depends && typeInfo.depends.length > 0) {
             const existing = Array.isArray(info.depends) ? info.depends : [];
             info.depends = Array.from(new Set([...existing, ...typeInfo.depends]));
@@ -496,9 +522,92 @@ function _enrichPtsAssetInfo(info: any) {
         _ptsTypeCache.set(file, typeInfo);
         if (info.uuid) {
             _ptsTypeCache.set(info.uuid, typeInfo);
+            _ptsUuids.add(info.uuid);
         }
     }
 }
+
+function _getAllPtsClasses(): Set<string> {
+    const classes = new Set<string>();
+    classes.add('pts');
+
+    for (const info of _ptsTypeCache.values()) {
+        if (info && info.type) classes.add(info.type);
+    }
+
+    try {
+        const projectPath = (typeof Editor !== 'undefined' && Editor.Project && Editor.Project.path) ? Editor.Project.path : process.cwd();
+        const searchDirs = [
+            path.join(projectPath, 'assets'),
+            path.join(projectPath, 'extensions/pts-asset/assets')
+        ];
+        const scan = (dir: string) => {
+            if (!fs.existsSync(dir)) return;
+            const entries = fs.readdirSync(dir, { withFileTypes: true });
+            for (const e of entries) {
+                if (e.name === 'node_modules' || e.name === '.git') continue;
+                const full = path.join(dir, e.name);
+                if (e.isDirectory()) scan(full);
+                else if (e.isFile() && e.name.endsWith('.pts')) {
+                    const t = getPtsTypeInfo(full);
+                    if (t && t.type) classes.add(t.type);
+                    // Also cache uuid from meta
+                    const metaFile = `${full}.meta`;
+                    if (fs.existsSync(metaFile)) {
+                        try {
+                            const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+                            if (meta && meta.uuid) _ptsUuids.add(meta.uuid);
+                        } catch {}
+                    }
+                }
+            }
+        };
+        for (const d of searchDirs) scan(d);
+    } catch {}
+
+    return classes;
+}
+
+function _enrichIconConfigMap(map: Record<string, any>) {
+    if (!map || typeof map !== 'object') return;
+
+    const ptsIconConfig = {
+        type: 'image',
+        value: 'packages://pts-asset/static/pts.png',
+        thumbnail: false
+    };
+
+    map['pts'] = ptsIconConfig;
+    const ptsClasses = _getAllPtsClasses();
+    for (const cls of ptsClasses) {
+        map[cls] = ptsIconConfig;
+    }
+}
+
+function _enrichAssetConfigMap(map: Record<string, any>) {
+    if (!map || typeof map !== 'object') return;
+
+    const ptsConfig = {
+        displayName: 'pTS Asset',
+        iconInfo: {
+            type: 'image',
+            value: 'packages://pts-asset/static/pts.png'
+        }
+    };
+
+    map['pts'] = ptsConfig;
+    const ptsClasses = _getAllPtsClasses();
+    for (const cls of ptsClasses) {
+        map[cls] = {
+            displayName: cls,
+            iconInfo: {
+                type: 'image',
+                value: 'packages://pts-asset/static/pts.png'
+            }
+        };
+    }
+}
+
 
 async function _filterAndEnrichQueryAssets(result: any[], options?: any): Promise<any[]> {
     if (!Array.isArray(result)) return result;
@@ -631,6 +740,30 @@ function _installIpcHook() {
                             result = await _filterAndEnrichQueryAssets(result, opts);
                         } else if (msg === 'query-asset-info' && result) {
                             _enrichPtsAssetInfo(result);
+                        } else if (msg === 'query-icon-config-map' && result && typeof result === 'object') {
+                            _enrichIconConfigMap(result);
+                        } else if (msg === 'query-asset-config-map' && result && typeof result === 'object') {
+                            _enrichAssetConfigMap(result);
+                        } else if (msg === 'query-asset-thumbnail') {
+                            const targetUuid = typeof opts === 'string' ? opts : (opts && opts.uuid ? opts.uuid : args[2]);
+                            if (_isPtsUuid(targetUuid)) {
+                                result = {
+                                    type: 'image',
+                                    value: 'packages://pts-asset/static/pts.png'
+                                };
+                            }
+                        }
+                    } else if (channel === 'asset-db:query-icon-config-map' && result && typeof result === 'object') {
+                        _enrichIconConfigMap(result);
+                    } else if (channel === 'asset-db:query-asset-config-map' && result && typeof result === 'object') {
+                        _enrichAssetConfigMap(result);
+                    } else if (channel === 'asset-db:query-asset-thumbnail') {
+                        const targetUuid = args[0];
+                        if (_isPtsUuid(targetUuid)) {
+                            result = {
+                                type: 'image',
+                                value: 'packages://pts-asset/static/pts.png'
+                            };
                         }
                     }
                 } catch (e) {
@@ -694,6 +827,50 @@ function _hookAssetDbRequireCache() {
                     target.queryAssetInfo = wrappedQueryInfo;
                     console.log('[pts-asset] Hooked asset-db queryAssetInfo in require.cache');
                 }
+
+                if (target && typeof target.queryIconConfigMap === 'function' && !target.queryIconConfigMap.__pts_hooked__) {
+                    const origQueryIcon = target.queryIconConfigMap;
+                    const wrappedQueryIcon = async function(...args: any[]) {
+                        const result = await origQueryIcon.call(target, ...args);
+                        if (result && typeof result === 'object') {
+                            _enrichIconConfigMap(result);
+                        }
+                        return result;
+                    };
+                    wrappedQueryIcon.__pts_hooked__ = true;
+                    target.queryIconConfigMap = wrappedQueryIcon;
+                    console.log('[pts-asset] Hooked asset-db queryIconConfigMap in require.cache');
+                }
+
+                if (target && typeof target.queryAssetConfigMap === 'function' && !target.queryAssetConfigMap.__pts_hooked__) {
+                    const origQueryAssetConfig = target.queryAssetConfigMap;
+                    const wrappedQueryAssetConfig = async function(...args: any[]) {
+                        const result = await origQueryAssetConfig.call(target, ...args);
+                        if (result && typeof result === 'object') {
+                            _enrichAssetConfigMap(result);
+                        }
+                        return result;
+                    };
+                    wrappedQueryAssetConfig.__pts_hooked__ = true;
+                    target.queryAssetConfigMap = wrappedQueryAssetConfig;
+                    console.log('[pts-asset] Hooked asset-db queryAssetConfigMap in require.cache');
+                }
+
+                if (target && typeof target.queryAssetThumbnail === 'function' && !target.queryAssetThumbnail.__pts_hooked__) {
+                    const origQueryThumb = target.queryAssetThumbnail;
+                    const wrappedQueryThumb = async function(uuid: string, ...args: any[]) {
+                        if (_isPtsUuid(uuid)) {
+                            return {
+                                type: 'image',
+                                value: 'packages://pts-asset/static/pts.png'
+                            };
+                        }
+                        return origQueryThumb.call(target, uuid, ...args);
+                    };
+                    wrappedQueryThumb.__pts_hooked__ = true;
+                    target.queryAssetThumbnail = wrappedQueryThumb;
+                    console.log('[pts-asset] Hooked asset-db queryAssetThumbnail in require.cache');
+                }
             }
         }
     } catch (err) {}
@@ -714,6 +891,18 @@ function _installMessageHook() {
                 _enrichPtsAssetInfo(result);
             } else if (message === 'query-assets' && Array.isArray(result)) {
                 result = await _filterAndEnrichQueryAssets(result, args[0]);
+            } else if (message === 'query-icon-config-map' && result && typeof result === 'object') {
+                _enrichIconConfigMap(result);
+            } else if (message === 'query-asset-config-map' && result && typeof result === 'object') {
+                _enrichAssetConfigMap(result);
+            } else if (message === 'query-asset-thumbnail') {
+                const targetUuid = args[0];
+                if (_isPtsUuid(targetUuid)) {
+                    result = {
+                        type: 'image',
+                        value: 'packages://pts-asset/static/pts.png'
+                    };
+                }
             }
         }
         return result;
