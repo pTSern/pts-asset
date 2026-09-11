@@ -224,6 +224,11 @@
                 "methods": [
                     "queryPreviewData"
                 ]
+            },
+            "set-runtime-property": {
+                "methods": [
+                    "setRuntimeProperty"
+                ]
             }
         }
     }

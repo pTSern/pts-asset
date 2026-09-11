@@ -23,7 +23,13 @@ interface _IArray extends _IBase {
 
 type _TData = _IArray | _IElem
 
-const _ignores = ['enabled', "name", "node", "uuid", "_enabled", "_name", "_objFlags", "_native"]
+const _ignores = [
+    'enabled', 'name', 'node', 'uuid', '_enabled', '_name', '_objFlags', '_native',
+    '_nativeAsset', '__editorExtras__', '_callbackTable', '_nativeUrl', '_file', '_ref',
+    'loaded', 'rawUrl', '_uuid',
+    '_isLoaded', '_ready', '_resolver', '_driver', '_onLoad', '_onReleased', '_onAwake', 'ready',
+    '_eventTargets', '_callback', '_handlers', '__waiters_', 'isValid'
+];
 import { AssetInfo } from '@cocos/creator-types/editor/packages/asset-db/@types/public'
 import fs from 'fs'
 interface Asset {
@@ -179,29 +185,56 @@ function setPreviewModeUI(panel: PanelThis, isPreview: boolean, foundInstance: b
             panel.$.previewBanner.style.borderColor = foundInstance ? '#4caf50' : '#ff9800';
             if (panel.$.previewStatusText) {
                 panel.$.previewStatusText.textContent = foundInstance
-                    ? '🟢 Live Preview Mode (Read-Only)'
+                    ? '🟢 Live Preview Mode (Runtime Instance Linked)'
                     : '🟠 Live Preview Mode';
             }
             if (panel.$.previewSubText) {
                 panel.$.previewSubText.textContent = foundInstance
-                    ? 'Runtime Instance Linked'
+                    ? 'Edits apply directly to game memory in real-time. Disk saving is disabled.'
                     : 'Waiting for runtime instance...';
             }
         }
     }
     if (panel.$.save) {
-        panel.$.save.disabled = isPreview;
-        panel.$.save.style.opacity = isPreview ? '0.4' : '1';
-        panel.$.save.title = isPreview ? 'Saving is disabled in Live Preview Mode (Read-Only)' : '';
+        if (isPreview) {
+            panel.$.save.setAttribute('disabled', 'true');
+            panel.$.save.disabled = true;
+            panel.$.save.style.opacity = '0.5';
+            panel.$.save.style.cursor = 'not-allowed';
+            panel.$.save.textContent = '⚡ Live Preview (In-Memory Only)';
+            panel.$.save.title = 'Disk saving is disabled in Live Preview Mode (edits apply directly to runtime memory without altering disk files)';
+        } else {
+            panel.$.save.removeAttribute('disabled');
+            panel.$.save.disabled = false;
+            panel.$.save.style.opacity = '1';
+            panel.$.save.style.cursor = 'pointer';
+            panel.$.save.textContent = 'Save Changes';
+            panel.$.save.title = 'Save changes to disk (.pts file)';
+        }
     }
     if (panel.$.fix) {
-        panel.$.fix.disabled = isPreview;
-        panel.$.fix.style.opacity = isPreview ? '0.4' : '1';
-        panel.$.fix.title = isPreview ? 'Fix is disabled in Live Preview Mode' : '';
+        if (isPreview) {
+            panel.$.fix.setAttribute('disabled', 'true');
+            panel.$.fix.disabled = true;
+            panel.$.fix.style.opacity = '0.4';
+            panel.$.fix.title = 'Fix is disabled in Live Preview Mode';
+        } else {
+            panel.$.fix.removeAttribute('disabled');
+            panel.$.fix.disabled = false;
+            panel.$.fix.style.opacity = '1';
+            panel.$.fix.title = '';
+        }
     }
     if (panel.$.lazyToggle) {
-        panel.$.lazyToggle.disabled = isPreview;
-        panel.$.lazyToggle.style.opacity = isPreview ? '0.4' : '1';
+        if (isPreview) {
+            panel.$.lazyToggle.setAttribute('disabled', 'true');
+            panel.$.lazyToggle.disabled = true;
+            panel.$.lazyToggle.style.opacity = '0.4';
+        } else {
+            panel.$.lazyToggle.removeAttribute('disabled');
+            panel.$.lazyToggle.disabled = false;
+            panel.$.lazyToggle.style.opacity = '1';
+        }
     }
 }
 
@@ -256,6 +289,14 @@ async function refreshLiveState(panel: PanelThis) {
                 setPreviewModeUI(panel, false, false);
                 stopPreviewPolling();
                 _livePreviewValues = null;
+                // Clean up any runtime-only editor props from _lastDump
+                if (_lastDump && _lastDump.value) {
+                    for (const k of Object.keys(_lastDump.value)) {
+                        if (_lastDump.value[k]?.isEditorProp || _lastDump.value[k]?.group?.name === '_Debugger') {
+                            delete _lastDump.value[k];
+                        }
+                    }
+                }
                 if (_currentAsset && _currentAsset.file) {
                     try {
                         const fileContent = fs.readFileSync(_currentAsset.file, { encoding: 'utf8' });
@@ -272,7 +313,84 @@ async function refreshLiveState(panel: PanelThis) {
         setPreviewModeUI(panel, true, !!state.found);
 
         if (state.found && state.values && _lastDump && _lastDump.value) {
+            let hasNewFields = false;
+
+            // 1. Incorporate dump items from state.dump (from scene script)
+            if (state.dump && state.dump.value) {
+                for (const k of Object.keys(state.dump.value)) {
+                    if (_ignores.includes(k)) continue;
+                    if (!_lastDump.value[k]) {
+                        _lastDump.value[k] = state.dump.value[k];
+                        hasNewFields = true;
+                    }
+                }
+            }
+
+            // 2. Incorporate @editor_property definitions from state.editorProps
+            if (state.editorProps && typeof state.editorProps === 'object') {
+                for (const [k, meta] of Object.entries(state.editorProps as Record<string, any>)) {
+                    if (_ignores.includes(k)) continue;
+                    if (!_lastDump.value[k]) {
+                        let typeName = 'Unknown';
+                        const v = state.values[k];
+                        if (meta.type) {
+                            typeName = String(meta.type);
+                        } else if (typeof v === 'boolean') {
+                            typeName = 'Boolean';
+                        } else if (typeof v === 'number') {
+                            typeName = Number.isInteger(v) ? 'Integer' : 'Float';
+                        } else if (typeof v === 'string') {
+                            typeName = 'String';
+                        }
+                        _lastDump.value[k] = {
+                            name: k,
+                            type: typeName,
+                            value: v,
+                            default: v,
+                            visible: true,
+                            readonly: meta.readonly !== false,
+                            displayName: meta.name || k,
+                            group: meta.group || { name: "_Debugger", id: "0" },
+                            isEditorProp: true
+                        };
+                        hasNewFields = true;
+                    } else {
+                        if (_lastDump.value[k].visible === false) {
+                            _lastDump.value[k].visible = true;
+                            hasNewFields = true;
+                        }
+                    }
+                }
+            }
+
+            // 3. Fallback: If any key in state.values is not in _lastDump.value and not ignored
+            for (const k of Object.keys(state.values)) {
+                if (_ignores.includes(k) || k.startsWith('_') || k.startsWith('__')) continue;
+                if (!_lastDump.value[k]) {
+                    const v = state.values[k];
+                    let typeName = 'Unknown';
+                    if (typeof v === 'boolean') typeName = 'Boolean';
+                    else if (typeof v === 'number') typeName = Number.isInteger(v) ? 'Integer' : 'Float';
+                    else if (typeof v === 'string') typeName = 'String';
+                    _lastDump.value[k] = {
+                        name: k,
+                        type: typeName,
+                        value: v,
+                        default: v,
+                        visible: true,
+                        readonly: true,
+                        displayName: k,
+                        group: { name: "_Debugger", id: "0" },
+                        isEditorProp: true
+                    };
+                    hasNewFields = true;
+                }
+            }
+
             _livePreviewValues = state.values;
+            if (hasNewFields) {
+                renderView.call(panel, _lastDump.value);
+            }
             updateLiveDumpAndFields(panel, state.values);
         }
     } catch {}
@@ -282,6 +400,7 @@ function updateLiveDumpAndFields(panel: PanelThis, liveValues: Record<string, an
     if (!panel.$.view || !_lastDump || !_lastDump.value) return;
 
     let needsFullReRender = false;
+    const activeEl = typeof document !== 'undefined' ? document.activeElement : null;
 
     for (const key of Object.keys(liveValues)) {
         if (_ignores.includes(key)) continue;
@@ -295,7 +414,11 @@ function updateLiveDumpAndFields(panel: PanelThis, liveValues: Record<string, an
         const el = panel.$.view.querySelector(`.pts-basic-prop[data-key="${key}"]`) as any;
         if (el) {
             el.dump = dumpItem;
-            if (el.render) el.render(dumpItem);
+            // Prevent wiping user's typing or stealing focus while actively editing a field
+            const isInteracting = activeEl && el.contains(activeEl);
+            if (!isInteracting) {
+                if (el.render) el.render(dumpItem);
+            }
         }
     }
 
@@ -334,6 +457,64 @@ function isNodeOrComponentArray(dump: any): boolean {
         if (dump.extends.includes('cc.Component') || dump.extends.includes('cc.Node')) return true;
     }
     return false;
+}
+
+function isPropertyReadonly(dump: any, propPath: string): boolean {
+    if (!dump || !dump.value || !propPath) return false;
+
+    // 1. Check dynamic getters metadata
+    if (dump.__getters__ && dump.__getters__[propPath]) {
+        if (dump.__getters__[propPath].readonly) return true;
+    }
+
+    const parts = propPath.split('.');
+    let cur = dump.value;
+
+    for (let i = 0; i < parts.length; i++) {
+        const part = parts[i];
+        if (!cur) return false;
+
+        let next: any = null;
+        if (cur[part] !== undefined) {
+            next = cur[part];
+        } else if (cur.value && cur.value[part] !== undefined) {
+            next = cur.value[part];
+        } else if (Array.isArray(cur.value) && !isNaN(Number(part))) {
+            next = cur.value[Number(part)];
+        } else if (Array.isArray(cur) && !isNaN(Number(part))) {
+            next = cur[Number(part)];
+        }
+
+        if (!next) {
+            return !!(cur && cur.readonly === true);
+        }
+
+        cur = next;
+        if (cur && cur.readonly === true) {
+            return true;
+        }
+        if (isNodeOrComponent(cur) || isNodeOrComponentArray(cur)) {
+            return true;
+        }
+    }
+
+    return !!(cur && cur.readonly === true);
+}
+
+function applyLocalLiveValueChange(targetObj: Record<string, any>, propPath: string, newValue: any) {
+    if (!targetObj || !propPath) return;
+    const parts = propPath.split('.');
+    let cur: any = targetObj;
+    for (let i = 0; i < parts.length - 1; i++) {
+        const p = parts[i];
+        if (cur[p] === undefined || cur[p] === null) {
+            const nextP = parts[i + 1];
+            cur[p] = !isNaN(Number(nextP)) ? [] : {};
+        }
+        cur = cur[p];
+    }
+    const lastKey = parts[parts.length - 1];
+    cur[lastKey] = newValue;
 }
 
 function normalizeType(type: string): string {
@@ -1655,6 +1836,13 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
     _currentAsset = newAsset;
     const _fileContent = fs.readFileSync(_currentAsset.file, { encoding: 'utf8' });
     _cachedData = JSON.parse(_fileContent);
+    if (_cachedData && _cachedData.__value__ && typeof _cachedData.__value__ === 'object') {
+        for (const k of Object.keys(_cachedData.__value__)) {
+            if (_ignores.includes(k) || k.startsWith('__')) {
+                delete _cachedData.__value__[k];
+            }
+        }
+    }
 
     if (this.$.jsonDisplay && this.$.jsonToggle) {
         const show = !!(this.$.jsonToggle.value || this.$.jsonToggle.checked);
@@ -1833,6 +2021,10 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         // Preserve any backing fields (e.g. _bundle) from _cachedData.__value__
         if (_cachedData.__value__) {
             for (const k in _cachedData.__value__) {
+                if (_ignores.includes(k) || k.startsWith('__')) {
+                    delete _cachedData.__value__[k];
+                    continue;
+                }
                 if (k.startsWith('_') && _cachedData.__value__[k] !== undefined && _cachedData.__value__[k] !== '') {
                     if (_lastDump?.value?.[k]?.value === undefined || _lastDump?.value?.[k]?.value === '') {
                         if (_lastDump?.value?.[k]) {
@@ -1848,6 +2040,15 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             for (const g in _lastDump.__getters__) {
                 if (_lastDump.__getters__[g].readonly) {
                     delete _cachedData.__value__[g];
+                }
+            }
+        }
+
+        // Strip any internal engine, lifecycle, ignored, or editor_property debug fields from __value__
+        if (_cachedData && _cachedData.__value__) {
+            for (const k of Object.keys(_cachedData.__value__)) {
+                if (_ignores.includes(k) || k.startsWith('__') || _lastDump?.value?.[k]?.isEditorProp || _lastDump?.value?.[k]?.group?.name === '_Debugger') {
+                    delete _cachedData.__value__[k];
                 }
             }
         }
@@ -1881,6 +2082,14 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             }
         } catch (err) {
             console.error('[pTS Inspector] Failed to save meta dependencies:', err);
+        }
+
+        // Re-scan & update _lazy.prefab immediately after writing to disk
+        try {
+            const report = await Editor.Message.request('pts-asset', 'sync-lazy-prefab');
+            console.log('[pTS Inspector] Re-scanned and synced _lazy.prefab after save:', report);
+        } catch (e) {
+            console.error('[pTS Inspector] Failed to sync lazy prefab after save:', e);
         }
 
         console.groupEnd();
@@ -1980,7 +2189,118 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
     }
 
     async function applyPropertyChange(panel: PanelThis, propPath: string, newValue: any) {
-        if (_isInLivePreviewMode || !_currentAsset || !_cachedData || !_cachedData.__type__) return;
+        if (!_currentAsset || !_cachedData || !_cachedData.__type__) return;
+
+        // Check if property is marked readonly
+        if (isPropertyReadonly(_lastDump, propPath)) {
+            console.warn(`[pTS Inspector] Property ${propPath} is readonly. Modification rejected.`);
+            return;
+        }
+
+        // Live Preview Mode: ONLY update runtime instance in memory! NEVER write to disk!
+        if (_isInLivePreviewMode) {
+            console.log(`[pTS Inspector] Live Preview Mode: Applying runtime property change to memory: ${propPath} =`, newValue);
+
+            const parts = propPath.split('.');
+            const key = parts[0];
+            const targetDump = _lastDump?.value?.[key];
+
+            // Type coercion: if dump property is numeric, ensure newValue is converted from string to number
+            if (targetDump && (targetDump.type === 'Number' || targetDump.type === 'Integer' || targetDump.type === 'Float') && typeof newValue === 'string' && !isNaN(Number(newValue))) {
+                newValue = Number(newValue);
+            }
+
+            // 1. Update _livePreviewValues in memory
+            if (!_livePreviewValues) {
+                _livePreviewValues = {};
+            }
+            applyLocalLiveValueChange(_livePreviewValues, propPath, newValue);
+
+            // 2. Immediately update local dump node so UI is responsive
+            if (parts.length === 1) {
+                if (targetDump && targetDump.isArray) {
+                    populateDumpWithSaved(targetDump, newValue);
+                    translateDump(targetDump.value, key);
+                } else if (targetDump) {
+                    targetDump.value = newValue;
+                }
+                const propEl = panel.$.view.querySelector(`.pts-basic-prop[data-key="${key}"]`) as any;
+                if (propEl && propEl.render && targetDump) {
+                    propEl.dump = targetDump;
+                    propEl.render(targetDump);
+                }
+            } else if (parts.length === 2) {
+                const [arrKey, idxStr] = parts;
+                const idx = parseInt(idxStr, 10);
+                const arrayDump = _lastDump?.value?.[arrKey];
+                if (arrayDump && Array.isArray(arrayDump.value) && arrayDump.value[idx]) {
+                    const itemDump = arrayDump.value[idx];
+                    if (isAssetType(itemDump)) {
+                        const uuid = typeof newValue === 'string' ? newValue : (newValue?.uuid || '');
+                        itemDump.value = { uuid };
+                    } else {
+                        itemDump.value = newValue;
+                    }
+                }
+            } else if (parts.length === 3) {
+                const [arrKey, idxStr, subKey] = parts;
+                const idx = parseInt(idxStr, 10);
+                if (_lastDump?.value?.[arrKey]?.value?.[idx]?.value?.[subKey]) {
+                    _lastDump.value[arrKey].value[idx].value[subKey].value = newValue;
+                }
+            }
+
+            const info = {
+                uuid: _currentAsset.uuid,
+                className: _cachedData.__type__,
+                propPath,
+                newValue
+            };
+
+            // 3. Send to pts-asset main process -> immediately updates _livePreviewData and broadcasts to PreviewInEditor!
+            try {
+                Editor.Message.send('pts-asset', 'set-runtime-property', info);
+            } catch (e) {
+                console.warn('[pTS Inspector] Failed to send set-runtime-property to pts-asset:', e);
+            }
+
+            // 4. Also notify scene script as fallback (for preview in scene mode)
+            try {
+                Editor.Message.request(
+                    'scene',
+                    'execute-scene-script',
+                    {
+                        name: 'pts-core',
+                        method: 'set_pts_runtime_property',
+                        args: [_currentAsset.uuid, _cachedData.__type__, propPath, newValue]
+                    }
+                ).then((liveResult: any) => {
+                    if (liveResult && liveResult.success) {
+                        if (liveResult.values) {
+                            _livePreviewValues = liveResult.values;
+                        }
+                        if (liveResult.dump && liveResult.dump.value) {
+                            _lastDump = liveResult.dump;
+                            translateDump(_lastDump.value, '');
+                        }
+                    }
+                }).catch(() => {});
+            } catch (e) {}
+
+            // 5. Update live getters & visibility
+            updateLiveGettersAndVisibility(panel);
+
+            // 6. Update jsonDisplay if open
+            if (panel.$.jsonDisplay && panel.$.jsonToggle && (panel.$.jsonToggle.value || panel.$.jsonToggle.checked)) {
+                panel.$.jsonDisplay.textContent = JSON.stringify({
+                    __type__: _cachedData?.__type__,
+                    __value__: _livePreviewValues
+                }, null, 4);
+            }
+
+            // STRICTLY RETURN HERE — NEVER auto-save or write to disk in runtime mode!
+            return;
+        }
 
         // Immediately update local dump node so UI is responsive
         const parts = propPath.split('.');
@@ -2062,7 +2382,13 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             }
 
             if (changeResult.values) {
-                _cachedData.__value__ = changeResult.values;
+                const cleanValues: Record<string, any> = {};
+                for (const k of Object.keys(changeResult.values)) {
+                    if (!_ignores.includes(k) && !k.startsWith('__')) {
+                        cleanValues[k] = changeResult.values[k];
+                    }
+                }
+                _cachedData.__value__ = cleanValues;
             }
 
             if (changeResult.dump && changeResult.dump.value) {
@@ -2303,7 +2629,20 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
 
     this.$.save.onclick = async () => {
         if (_autoSaveTimer) clearTimeout(_autoSaveTimer);
-        await saveAsset();
+        const origText = this.$.save.textContent;
+        try {
+            this.$.save.textContent = 'Saving & Syncing...';
+            await saveAsset();
+            this.$.save.textContent = 'Saved & Synced! ✔';
+            setTimeout(() => {
+                if (!_isInLivePreviewMode && this.$.save) {
+                    this.$.save.textContent = origText || 'Save Changes';
+                }
+            }, 1200);
+        } catch (err) {
+            console.error('[pTS Inspector] Error during save & sync:', err);
+            if (this.$.save) this.$.save.textContent = origText || 'Save Changes';
+        }
     };
 
     this.$.fix.onclick = async () => {
@@ -2392,6 +2731,14 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             }
         } catch (err) {
             console.error('[pTS Inspector] Failed to save meta for uuid=' + _currentAsset.uuid, err);
+        }
+
+        // Re-scan & update _lazy.prefab after fix
+        try {
+            const report = await Editor.Message.request('pts-asset', 'sync-lazy-prefab');
+            console.log('[pTS Inspector] Re-scanned and synced _lazy.prefab after fix:', report);
+        } catch (e) {
+            console.error('[pTS Inspector] Failed to sync lazy prefab after fix:', e);
         }
 
 
