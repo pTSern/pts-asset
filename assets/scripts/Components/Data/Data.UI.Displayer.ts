@@ -1,6 +1,6 @@
 import { _decorator, Component } from 'cc';
-import { pTSAsset_Data } from '../../pTSAssets/pTSAsset.Data';
 import { Smart_Label_Hooker } from 'db://pts-core/scripts/Components/Smart/Label/Hooker/Smart.Label.Hooker';
+import { pTSAsset_Data } from 'db://pts-core/scripts/pTSAsset/pTSAsset.Data';
 
 const { ccclass, property } = _decorator;
 
