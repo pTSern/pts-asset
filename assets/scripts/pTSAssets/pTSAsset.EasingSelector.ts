@@ -1,4 +1,4 @@
-import { _decorator, Component, Enum, TweenEasing } from 'cc';
+import { _decorator, Enum, TweenEasing } from 'cc';
 import { pTSAsset } from 'db://pts-core/scripts/pTSAsset';
 import { Type_CCEasing } from 'db://pts-core/scripts/Components/Type/Type.Easing';
 import { pClass, pConst } from 'db://pts-core/scripts/utils';

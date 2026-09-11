@@ -1,6 +1,6 @@
 
 import { _decorator, CCString } from 'cc';
-import { pTSAsset_Data } from './pTSAsset.Data';
+import { pTSAsset_Data } from 'db://pts-core/scripts/pTSAsset/pTSAsset.Data';
 
 const { ccclass, property } = _decorator;
 

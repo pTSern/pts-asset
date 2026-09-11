@@ -242,7 +242,8 @@ export const methods: { [key: string]: (...any: any) => any } = {
             return {
                 isPreview: true,
                 found: true,
-                values: foundItem.values || foundItem
+                values: foundItem.values || foundItem,
+                editorProps: foundItem.editorProps || {}
             };
         }
 
@@ -250,6 +251,57 @@ export const methods: { [key: string]: (...any: any) => any } = {
             isPreview: true,
             found: false
         };
+    },
+
+    setRuntimeProperty(info: { uuid: string; className?: string; propPath: string; newValue: any }) {
+        if (!info || !info.uuid) return { success: false, error: 'Missing uuid' };
+
+        _lastPreviewHeartbeat = Date.now();
+
+        // 1. Immediately update _livePreviewData in main process so queryPreviewData NEVER snaps back
+        if (_livePreviewData) {
+            let found = _livePreviewData[info.uuid];
+            if (!found && info.className) found = _livePreviewData[info.className];
+            if (!found) {
+                for (const k of Object.keys(_livePreviewData)) {
+                    const it = _livePreviewData[k];
+                    if (it && (it.uuid === info.uuid || it._uuid === info.uuid)) {
+                        found = it;
+                        break;
+                    }
+                }
+            }
+            if (found) {
+                const vals = found.values || found;
+                if (vals && typeof vals === 'object') {
+                    const parts = String(info.propPath).split('.');
+                    let cur: any = vals;
+                    for (let i = 0; i < parts.length - 1; i++) {
+                        const p = parts[i];
+                        if (cur[p] === undefined || cur[p] === null) {
+                            cur[p] = !isNaN(Number(parts[i + 1])) ? [] : {};
+                        }
+                        cur = cur[p];
+                    }
+                    const lastKey = parts[parts.length - 1];
+                    let valToAssign = info.newValue;
+                    if (typeof cur[lastKey] === 'number' && typeof valToAssign === 'string' && !isNaN(Number(valToAssign))) {
+                        valToAssign = Number(valToAssign);
+                    }
+                    cur[lastKey] = valToAssign;
+                }
+            }
+        }
+
+        // 2. Broadcast to PreviewInEditor and other renderer processes
+        try {
+            Editor.Message.broadcast('pts-asset:set-runtime-property', info);
+            console.log(`[pts-asset:main] Broadcasted set-runtime-property for ${info.uuid}: ${info.propPath} =`, info.newValue);
+        } catch (e) {
+            console.warn('[pts-asset:main] Failed to broadcast set-runtime-property:', e);
+        }
+
+        return { success: true };
     },
 
 };
