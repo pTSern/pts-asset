@@ -5,6 +5,7 @@ import path from 'path'
 import { AssetInfo, IAssetMeta } from '@cocos/creator-types/editor/packages/asset-db/@types/public'
 import { getExtendsChain, setRuntimeInheritanceChains, clearInheritanceCache, scanSingleFile, scanInheritance } from './inheritance'
 import { rescanAndSyncLazyPrefab, cleanOrphanMetas } from './lazy-registry'
+import { fixPtsAssetsForScript, fixAllPtsAssets } from './pts-fixer'
 
 function openUrl(url: string) {
     try {
@@ -60,19 +61,38 @@ export async function checkPtsCoreDependency(showDialog: boolean = true): Promis
     }
 }
 
+let _scriptAutoFixTimer: any = null;
+const _pendingScriptFixes = new Set<string>();
+
+function scheduleScriptAutoFix(tsFile: string) {
+    _pendingScriptFixes.add(tsFile);
+    if (_scriptAutoFixTimer) clearTimeout(_scriptAutoFixTimer);
+    _scriptAutoFixTimer = setTimeout(async () => {
+        const filesToProcess = Array.from(_pendingScriptFixes);
+        _pendingScriptFixes.clear();
+        for (const file of filesToProcess) {
+            try {
+                await fixPtsAssetsForScript(file);
+            } catch (err) {
+                console.error(`[pts-asset] Error auto-fixing .pts assets for ${file}:`, err);
+            }
+        }
+    }, 800);
+}
+
 export const methods: { [key: string]: (...any: any) => any } = {
     pts_updater: async function() {
-        const _array = await Editor.Message.request('asset-db', 'query-assets', {
-            pattern: 'db://assets/**/*.pts'
-        });
-
-        console.log("[pTS_Updater] >>> List pts", _array);
-
-        for (const _ of _array) {
-            const _meta = await Editor.Message.request('asset-db', 'query-asset-meta', _.uuid);
-            if(!_meta) continue;
-            await _patchPtsLibrary(_.uuid, _, _meta);
-        }
+        const report = await fixAllPtsAssets();
+        console.log(`[pTS_Updater] Batch-fixed all .pts assets:`, report);
+        return report;
+    },
+    fixAllPtsAssets: async function() {
+        const report = await fixAllPtsAssets();
+        return report;
+    },
+    fixPtsForScript: async function(tsFile: string) {
+        const report = await fixPtsAssetsForScript(tsFile);
+        return report;
     },
     syncLazyPrefab() {
         const report = rescanAndSyncLazyPrefab();
@@ -172,7 +192,7 @@ export const methods: { [key: string]: (...any: any) => any } = {
             _ptsTypeCache.delete(uuid);
             if (data.file) _ptsTypeCache.delete(data.file);
 
-            // If a script (.ts) was added/changed, rescan inheritance immediately!
+            // If a script (.ts) was added/changed, rescan inheritance and auto-fix affected .pts assets!
             if (data.file && data.file.endsWith('.ts') && !data.file.endsWith('.d.ts')) {
                 console.log(`[pts-asset] TypeScript asset changed (${data.file}), refreshing inheritance...`);
                 scanSingleFile(data.file);
@@ -188,6 +208,10 @@ export const methods: { [key: string]: (...any: any) => any } = {
                         }
                     }).catch(() => {});
                 } catch {}
+
+                // Schedule debounced auto-fix for all .pts assets derived from or owned by classes in this script
+                scheduleScriptAutoFix(data.file);
+
                 return;
             }
 

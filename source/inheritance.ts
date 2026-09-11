@@ -5,6 +5,7 @@ import pkg from '../package.json';
 declare const Editor: any;
 
 const _parentMap = new Map<string, string>();
+const _implementsMap = new Map<string, Set<string>>();
 const _tsToCcMap = new Map<string, string>();
 const _ccToTsMap = new Map<string, string>();
 const _runtimeChains = new Map<string, string[]>();
@@ -44,12 +45,13 @@ function parseTsFile(filePath: string): void {
         const content = fs.readFileSync(filePath, 'utf8');
         if (!content.includes('class')) return;
 
-        const classRegex = /((?:export\s+|default\s+|abstract\s+)*)class\s+([A-Za-z0-9_]+)(?:<[\s\S]*?>)?\s+extends\s+([A-Za-z0-9_.]+)(?:<[\s\S]*?>)?/g;
+        const classRegex = /((?:export\s+|default\s+|abstract\s+)*)class\s+([A-Za-z0-9_]+)(?:<[\s\S]*?>)?(?:\s+extends\s+([A-Za-z0-9_.]+)(?:<[\s\S]*?>)?)?(?:\s+implements\s+([^{]+))?/g;
 
         for (const match of content.matchAll(classRegex)) {
             const tsClassName = match[2];
             const parentRaw = match[3];
-            const parentClass = parentRaw.split('.').pop() || parentRaw;
+            const parentClass = parentRaw ? (parentRaw.split('.').pop() || parentRaw) : '';
+            const implementsRaw = match[4];
 
             let finalClassName = tsClassName;
             const textBefore = content.substring(0, match.index);
@@ -64,8 +66,47 @@ function parseTsFile(filePath: string): void {
             _tsToCcMap.set(tsClassName, finalClassName);
             _ccToTsMap.set(finalClassName, tsClassName);
 
-            _parentMap.set(tsClassName, parentClass);
-            _parentMap.set(finalClassName, parentClass);
+            if (parentClass) {
+                _parentMap.set(tsClassName, parentClass);
+                _parentMap.set(finalClassName, parentClass);
+            }
+
+            // Parse implemented contracts
+            const implSet = new Set<string>();
+
+            // 1. From implements keyword: e.g. implements Data, Other
+            if (implementsRaw) {
+                const parts = implementsRaw.split(',').map(s => s.trim().replace(/<[\s\S]*?>/g, '').split('.').pop() || '').filter(Boolean);
+                for (const p of parts) {
+                    implSet.add(p);
+                }
+            }
+
+            // 2. From @implement(...) or @imps(...) decorators in preceding block
+            const lastBrace = textBefore.lastIndexOf('}');
+            const decoratorSlice = lastBrace !== -1 ? textBefore.substring(lastBrace + 1) : textBefore;
+            const implDecorators = [...decoratorSlice.matchAll(/@(?:implement|imps)\s*\(([^)]+)\)/g)];
+            for (const dec of implDecorators) {
+                if (dec[1]) {
+                    const args = dec[1].split(',').map(s => {
+                        let clean = s.trim().replace(/['"\[\]]/g, '').trim();
+                        if (clean.includes('.')) clean = clean.split('.').pop() || clean;
+                        return clean;
+                    }).filter(Boolean);
+                    for (const a of args) {
+                        implSet.add(a);
+                    }
+                }
+            }
+
+            if (implSet.size > 0) {
+                if (!_implementsMap.has(tsClassName)) _implementsMap.set(tsClassName, new Set());
+                if (!_implementsMap.has(finalClassName)) _implementsMap.set(finalClassName, new Set());
+                for (const item of implSet) {
+                    _implementsMap.get(tsClassName)!.add(item);
+                    _implementsMap.get(finalClassName)!.add(item);
+                }
+            }
         }
     } catch {}
 }
@@ -75,6 +116,7 @@ export function scanInheritance(force: boolean = false): void {
     _hasScanned = true;
 
     _parentMap.clear();
+    _implementsMap.clear();
     _tsToCcMap.clear();
     _ccToTsMap.clear();
 
@@ -176,7 +218,7 @@ export function scanSingleFile(filePath: string): void {
 
 export function hasScannedClass(className: string): boolean {
     if (!className) return true;
-    return _runtimeChains.has(className) || _parentMap.has(className) || _tsToCcMap.has(className) || _ccToTsMap.has(className);
+    return _runtimeChains.has(className) || _parentMap.has(className) || _implementsMap.has(className) || _tsToCcMap.has(className) || _ccToTsMap.has(className);
 }
 
 export function setRuntimeInheritanceChains(chains: Record<string, string[]>): void {
@@ -191,6 +233,7 @@ export function setRuntimeInheritanceChains(chains: Record<string, string[]>): v
 export function clearInheritanceCache(): void {
     _hasScanned = false;
     _parentMap.clear();
+    _implementsMap.clear();
     _tsToCcMap.clear();
     _ccToTsMap.clear();
     _runtimeChains.clear();
@@ -255,6 +298,34 @@ export function getExtendsChain(className: string): string[] {
         cur = parentCc || parent;
     }
 
+    // Merge implemented contracts into chain
+    const implsToResolve = new Set<string>();
+    for (const item of chain) {
+        const itemImpls = _implementsMap.get(item);
+        if (itemImpls) {
+            for (const impl of itemImpls) {
+                implsToResolve.add(impl);
+            }
+        }
+    }
+
+    for (const impl of implsToResolve) {
+        if (!visited.has(impl)) {
+            visited.add(impl);
+            const implChain = getExtendsChain(impl);
+            for (const c of implChain) {
+                if (!chain.includes(c)) {
+                    const leafIndex = chain.indexOf(className);
+                    if (leafIndex !== -1) {
+                        chain.splice(leafIndex, 0, c);
+                    } else {
+                        chain.push(c);
+                    }
+                }
+            }
+        }
+    }
+
     if (!chain.includes('pTSAsset')) {
         chain.unshift('pTSAsset');
     }
@@ -272,4 +343,39 @@ export function getExtendsChain(className: string): string[] {
     }
 
     return chain;
+}
+
+/**
+ * Extract all class names (both TypeScript identifier and @ccclass registered name) declared in a .ts file.
+ */
+export function getClassesInTsFile(filePath: string): string[] {
+    const classes = new Set<string>();
+    try {
+        if (!fs.existsSync(filePath)) return [];
+        const content = fs.readFileSync(filePath, 'utf8');
+        if (!content.includes('class')) return [];
+
+        // 1. Find all @ccclass('ClassName')
+        const ccMatches = content.matchAll(/@ccclass\s*\(\s*['"]([^'"]+)['"]\s*\)/g);
+        for (const m of ccMatches) {
+            if (m[1]) classes.add(m[1].trim());
+        }
+
+        // 2. Find all class Foo
+        const classMatches = content.matchAll(/(?:export\s+|default\s+|abstract\s+)*class\s+([A-Za-z0-9_]+)/g);
+        for (const m of classMatches) {
+            if (m[1]) classes.add(m[1].trim());
+        }
+    } catch {}
+    return Array.from(classes);
+}
+
+/**
+ * Check if targetClass is equal to ancestorClass or is a subclass of ancestorClass.
+ */
+export function isSubclassOrSame(targetClass: string, ancestorClass: string): boolean {
+    if (!targetClass || !ancestorClass) return false;
+    if (targetClass === ancestorClass) return true;
+    const chain = getExtendsChain(targetClass);
+    return chain.includes(ancestorClass);
 }
