@@ -22,14 +22,29 @@ interface _IArray extends _IBase {
 }
 
 type _TData = _IArray | _IElem
+import {
+    _ignores,
+    _uuidTypeCache,
+    setUuidType,
+    getUuidType,
+    normalizeType,
+    isRealCurve,
+    isGradient,
+    isValueType,
+    isNestedDump,
+    isNodeOrComponent,
+    isNodeOrComponentArray,
+    isEnumType,
+    isAssetType,
+    extractAssetDependencies,
+    populateDumpWithSaved,
+    resolveAllAssetSubtypes,
+    extractDumpValue,
+    collectValuesFromDump,
+    fixSinglePtsAsset
+} from './pts-fixer';
 
-const _ignores = [
-    'enabled', 'name', 'node', 'uuid', '_enabled', '_name', '_objFlags', '_native',
-    '_nativeAsset', '__editorExtras__', '_callbackTable', '_nativeUrl', '_file', '_ref',
-    'loaded', 'rawUrl', '_uuid',
-    '_isLoaded', '_ready', '_resolver', '_driver', '_onLoad', '_onReleased', '_onAwake', 'ready',
-    '_eventTargets', '_callback', '_handlers', '__waiters_', 'isValid'
-];
+export { extractAssetDependencies, extractDumpValue, collectValuesFromDump, populateDumpWithSaved, isEnumType };
 import { AssetInfo } from '@cocos/creator-types/editor/packages/asset-db/@types/public'
 import fs from 'fs'
 interface Asset {
@@ -330,6 +345,8 @@ async function refreshLiveState(panel: PanelThis) {
             if (state.editorProps && typeof state.editorProps === 'object') {
                 for (const [k, meta] of Object.entries(state.editorProps as Record<string, any>)) {
                     if (_ignores.includes(k)) continue;
+                    // Only incorporate if state.values actually has this key
+                    if (state.values && !(k in state.values)) continue;
                     if (!_lastDump.value[k]) {
                         let typeName = 'Unknown';
                         const v = state.values[k];
@@ -366,6 +383,7 @@ async function refreshLiveState(panel: PanelThis) {
             // 3. Fallback: If any key in state.values is not in _lastDump.value and not ignored
             for (const k of Object.keys(state.values)) {
                 if (_ignores.includes(k) || k.startsWith('_') || k.startsWith('__')) continue;
+                if (state.values[k] === undefined) continue;
                 if (!_lastDump.value[k]) {
                     const v = state.values[k];
                     let typeName = 'Unknown';
@@ -434,30 +452,6 @@ function updateLiveDumpAndFields(panel: PanelThis, liveValues: Record<string, an
     }
 }
 
-function isNodeOrComponent(dump: any): boolean {
-    if (!dump) return false;
-    if (dump.isArray) return false;
-    const type = dump.type;
-    if (type === 'cc.Node' || type === 'cc.Component') return true;
-    if (Array.isArray(dump.extends)) {
-        if (dump.extends.includes('cc.Component') || dump.extends.includes('cc.Node')) return true;
-    }
-    return false;
-}
-
-function isNodeOrComponentArray(dump: any): boolean {
-    if (!dump || !dump.isArray) return false;
-    const elemType = dump.elementTypeData?.type || (typeof dump.type === 'string' ? dump.type.replace(/^\[|\]$/g, '') : '');
-    if (elemType === 'cc.Node' || elemType === 'cc.Component') return true;
-    if (dump.elementTypeData && isNodeOrComponent(dump.elementTypeData)) return true;
-    if (Array.isArray(dump.elementTypeData?.extends)) {
-        if (dump.elementTypeData.extends.includes('cc.Component') || dump.elementTypeData.extends.includes('cc.Node')) return true;
-    }
-    if (Array.isArray(dump.extends)) {
-        if (dump.extends.includes('cc.Component') || dump.extends.includes('cc.Node')) return true;
-    }
-    return false;
-}
 
 function isPropertyReadonly(dump: any, propPath: string): boolean {
     if (!dump || !dump.value || !propPath) return false;
@@ -507,490 +501,126 @@ function applyLocalLiveValueChange(targetObj: Record<string, any>, propPath: str
     let cur: any = targetObj;
     for (let i = 0; i < parts.length - 1; i++) {
         const p = parts[i];
+        if (cur && typeof cur === 'object' && cur.__value__ && !Array.isArray(cur)) {
+            cur = cur.__value__;
+        }
         if (cur[p] === undefined || cur[p] === null) {
             const nextP = parts[i + 1];
             cur[p] = !isNaN(Number(nextP)) ? [] : {};
         }
         cur = cur[p];
     }
+    if (cur && typeof cur === 'object' && cur.__value__ && !Array.isArray(cur)) {
+        cur = cur.__value__;
+    }
     const lastKey = parts[parts.length - 1];
     cur[lastKey] = newValue;
 }
 
-function normalizeType(type: string): string {
-    if (!type) return type;
-    const valueTypes = ['Vec2', 'Vec3', 'Vec4', 'Color', 'Rect', 'Size'];
-    if (valueTypes.includes(type)) {
-        return 'cc.' + type;
-    }
-    if (type === 'RealCurve' || type === 'cc.RealCurve') {
-        return 'cc.RealCurve';
-    }
-    if (type === 'Gradient' || type === 'cc.Gradient') {
-        return 'cc.Gradient';
-    }
-    if (type === 'GradientRange' || type === 'cc.GradientRange') {
-        return 'cc.GradientRange';
-    }
-    if (type === 'CurveRange' || type === 'cc.CurveRange') {
-        return 'cc.CurveRange';
-    }
-    return type;
-}
+function findDumpNodeByPath(rootDump: any, propPath: string): any {
+    if (!rootDump || !rootDump.value || !propPath) return null;
+    const parts = propPath.split('.');
+    let curr: any = rootDump.value;
 
-function isRealCurve(dump: any): boolean {
-    if (!dump) return false;
-    const type = normalizeType(dump.type);
-    if (type === 'cc.RealCurve') return true;
-    if (Array.isArray(dump.extends) && dump.extends.includes('cc.RealCurve')) return true;
-    if (dump.value && typeof dump.value === 'object' && Array.isArray(dump.value.keyFrames)) return true;
-    return false;
-}
+    for (let i = 0; i < parts.length; i++) {
+        const part = parts[i];
+        if (!curr) return null;
 
-function isGradient(dump: any): boolean {
-    if (!dump) return false;
-    const type = normalizeType(dump.type);
-    if (type === 'cc.Gradient') return true;
-    if (Array.isArray(dump.extends) && dump.extends.includes('cc.Gradient')) return true;
-    if (Array.isArray(dump.alphaKeys) || Array.isArray(dump.colorKeys)) return true;
-    if (dump.value && typeof dump.value === 'object' && (Array.isArray(dump.value.alphaKeys) || Array.isArray(dump.value.colorKeys))) return true;
-    return false;
-}
-
-function isValueType(dump: any): boolean {
-    if (!dump) return false;
-    const type = normalizeType(dump.type);
-    return type === 'cc.Vec2' || type === 'cc.Vec3' || type === 'cc.Vec4' ||
-           type === 'cc.Color' || type === 'cc.Rect' || type === 'cc.Size' ||
-           (Array.isArray(dump.extends) && dump.extends.includes('cc.ValueType'));
-}
-
-function isNestedDump(val: any): boolean {
-    if (!val || typeof val !== 'object' || Array.isArray(val)) return false;
-    const keys = Object.keys(val);
-    if (keys.length === 0) return false;
-    const sample = val[keys[0]];
-    return sample && typeof sample === 'object' && ('type' in sample || 'value' in sample || 'name' in sample);
-}
-
-function isAssetType(dump: any): boolean {
-    if (!dump || dump.isArray) return false;
-    if (isNodeOrComponent(dump)) return false;
-    if (dump.extends?.includes('cc.Asset') || dump.type === 'cc.Asset') return true;
-    if (dump.value && typeof dump.value === 'object' && 'uuid' in dump.value) return true;
-    return false;
-}
-
-/**
- * Recursively extract all referenced asset UUIDs from a .pts data structure.
- */
-export function extractAssetDependencies(val: any, out: Set<string> = new Set()): string[] {
-    if (!val || typeof val !== 'object') return Array.from(out);
-
-    if (Array.isArray(val)) {
-        for (const item of val) extractAssetDependencies(item, out);
-        return Array.from(out);
-    }
-
-    if (val.__value__ && typeof val.__value__ === 'object' && typeof val.__value__.uuid === 'string' && val.__value__.uuid) {
-        out.add(val.__value__.uuid);
-    } else if (typeof val.uuid === 'string' && val.uuid) {
-        out.add(val.uuid);
-    }
-
-    for (const k of Object.keys(val)) {
-        if (k === '__type__') continue;
-        extractAssetDependencies(val[k], out);
-    }
-
-    return Array.from(out);
-}
-
-/**
- * Recursively merge saved .pts data into the editor's class dump structure.
- * If saved data is missing or empty, preserves default values from dump.
- * If Node or Component, forces readonly and null.
- */
-function populateDumpWithSaved(dump: any, savedVal: any) {
-    if (!dump) return;
-
-    // 1. Array of Node or Component: ALWAYS disabled, empty array []
-    if (dump.isArray && isNodeOrComponentArray(dump)) {
-        dump.readonly = true;
-        dump.default = [];
-        dump.value = [];
-        return;
-    }
-
-    // 2. Single Node or Component: ALWAYS disabled, null, readonly
-    if (isNodeOrComponent(dump)) {
-        dump.readonly = true;
-        dump.value = { uuid: "" };
-        dump.default = null;
-        return;
-    }
-
-    // 3. Arrays
-    if (dump.isArray) {
-        if (Array.isArray(savedVal)) {
-            if (!Array.isArray(dump.value)) {
-                dump.value = [];
+        let node: any = null;
+        if (Array.isArray(curr)) {
+            const idx = parseInt(part, 10);
+            if (!isNaN(idx) && idx >= 0 && idx < curr.length) {
+                node = curr[idx];
             }
-            while (dump.value.length < savedVal.length) {
-                const newElem = JSON.parse(JSON.stringify(dump.elementTypeData || {}));
-                dump.value.push(newElem);
-            }
-            if (dump.value.length > savedVal.length) {
-                dump.value.length = savedVal.length;
-            }
-            for (let i = 0; i < savedVal.length; i++) {
-                populateDumpWithSaved(dump.value[i], savedVal[i]);
-            }
-        } else {
-            dump.value = Array.isArray(dump.default) ? [...dump.default] : [];
+        } else if (typeof curr === 'object') {
+            node = curr[part];
         }
-        return;
-    }
 
-    // Extract unwrapped data if wrapped in { __type__, __value__ }
-    const vData = (savedVal && typeof savedVal === 'object' && '__value__' in savedVal)
-        ? savedVal.__value__
-        : savedVal;
-
-    // 4. RealCurve
-    if (isRealCurve(dump)) {
-        if (vData && typeof vData === 'object') {
-            let keyFrames: any[] = [];
-            if (Array.isArray(vData.keyFrames)) {
-                keyFrames = vData.keyFrames.map((kf: any) => ({
-                    time: typeof kf.time === 'number' ? kf.time : 0,
-                    value: typeof kf.value === 'number' ? kf.value : 0,
-                    inTangent: typeof kf.inTangent === 'number' ? kf.inTangent : (typeof kf.leftTangent === 'number' ? kf.leftTangent : 0),
-                    outTangent: typeof kf.outTangent === 'number' ? kf.outTangent : (typeof kf.rightTangent === 'number' ? kf.rightTangent : 0),
-                    inTangentWeight: typeof kf.inTangentWeight === 'number' ? kf.inTangentWeight : (typeof kf.leftTangentWeight === 'number' ? kf.leftTangentWeight : 1),
-                    outTangentWeight: typeof kf.outTangentWeight === 'number' ? kf.outTangentWeight : (typeof kf.rightTangentWeight === 'number' ? kf.rightTangentWeight : 1),
-                    interpMode: typeof kf.interpMode === 'number' ? kf.interpMode : (typeof kf.interpolationMode === 'number' ? kf.interpolationMode : 0),
-                    tangentWeightMode: typeof kf.tangentWeightMode === 'number' ? kf.tangentWeightMode : 0
-                }));
-            } else if (Array.isArray(vData._times) && Array.isArray(vData._values)) {
-                keyFrames = vData._times.map((t: number, i: number) => {
-                    const v = vData._values[i] || {};
-                    return {
-                        time: t,
-                        value: typeof v.value === 'number' ? v.value : 0,
-                        inTangent: typeof v.leftTangent === 'number' ? v.leftTangent : (typeof v.inTangent === 'number' ? v.inTangent : 0),
-                        outTangent: typeof v.rightTangent === 'number' ? v.rightTangent : (typeof v.outTangent === 'number' ? v.outTangent : 0),
-                        inTangentWeight: typeof v.leftTangentWeight === 'number' ? v.leftTangentWeight : (typeof v.inTangentWeight === 'number' ? v.inTangentWeight : 1),
-                        outTangentWeight: typeof v.rightTangentWeight === 'number' ? v.rightTangentWeight : (typeof v.outTangentWeight === 'number' ? v.outTangentWeight : 1),
-                        interpMode: typeof v.interpolationMode === 'number' ? v.interpolationMode : (typeof v.interpMode === 'number' ? v.interpMode : 0),
-                        tangentWeightMode: typeof v.tangentWeightMode === 'number' ? v.tangentWeightMode : 0
-                    };
-                });
-            }
-
-            dump.value = {
-                keyFrames,
-                multiplier: typeof vData.multiplier === 'number' ? vData.multiplier : 1,
-                preExtrapolation: vData.preExtrapolation ?? 1,
-                postExtrapolation: vData.postExtrapolation ?? 1
-            };
-        } else {
-            dump.value = dump.default || { keyFrames: [], multiplier: 1 };
-        }
-        return;
-    }
-
-    // 5. Gradient
-    if (isGradient(dump)) {
-        if (vData && typeof vData === 'object') {
-            let modeVal = 0;
-            if (typeof vData.mode === 'number') {
-                modeVal = vData.mode;
-            } else if (vData.value && typeof vData.value.mode === 'number') {
-                modeVal = vData.value.mode;
-            } else if (vData.value && typeof vData.value.mode?.value === 'number') {
-                modeVal = vData.value.mode.value;
-            }
-
-            const rawAlphaKeys = Array.isArray(vData.alphaKeys) 
-                ? vData.alphaKeys 
-                : (vData.value && Array.isArray(vData.value.alphaKeys) ? vData.value.alphaKeys : []);
-            const alphaKeys = rawAlphaKeys.map((ak: any) => ({
-                time: typeof ak.time === 'number' ? ak.time : 0,
-                alpha: typeof ak.alpha === 'number' ? ak.alpha : 255
-            }));
-
-            const rawColorKeys = Array.isArray(vData.colorKeys) 
-                ? vData.colorKeys 
-                : (vData.value && Array.isArray(vData.value.colorKeys) ? vData.value.colorKeys : []);
-            const colorKeys = rawColorKeys.map((ck: any) => {
-                let colorVal = ck.color;
-                if (colorVal && typeof colorVal === 'object' && !Array.isArray(colorVal)) {
-                    colorVal = [colorVal.r ?? 255, colorVal.g ?? 255, colorVal.b ?? 255];
-                } else if (!Array.isArray(colorVal)) {
-                    colorVal = [255, 255, 255];
+        if (!node && curr.value && typeof curr.value === 'object') {
+            if (Array.isArray(curr.value)) {
+                const idx = parseInt(part, 10);
+                if (!isNaN(idx) && idx >= 0 && idx < curr.value.length) {
+                    node = curr.value[idx];
                 }
-                return {
-                    time: typeof ck.time === 'number' ? ck.time : 0,
-                    color: colorVal
-                };
-            });
-
-            dump.type = 'cc.Gradient';
-            if (dump.value && typeof dump.value === 'object' && dump.value.mode && typeof dump.value.mode === 'object' && 'value' in dump.value.mode) {
-                dump.value.mode.value = modeVal;
             } else {
-                dump.value = { mode: { name: 'mode', value: modeVal, default: 0, type: 'Number', readonly: false, visible: true, animatable: true, extends: [] } };
+                node = curr.value[part];
             }
-            dump.alphaKeys = alphaKeys;
-            dump.colorKeys = colorKeys;
-            dump.value.alphaKeys = alphaKeys;
-            dump.value.colorKeys = colorKeys;
+        }
+
+        if (!node) return null;
+
+        if (i === parts.length - 1) {
+            return node;
+        }
+
+        curr = (node.value !== undefined) ? node.value : node;
+    }
+    return null;
+}
+
+function updateCachedDataByPath(rootValue: any, propPath: string, valToSet: any): void {
+    if (!rootValue || !propPath) return;
+    const parts = propPath.split('.');
+    let cur: any = rootValue;
+
+    for (let i = 0; i < parts.length - 1; i++) {
+        const part = parts[i];
+        const nextPart = parts[i + 1];
+
+        if (cur && typeof cur === 'object' && cur.__value__ && !Array.isArray(cur)) {
+            cur = cur.__value__;
+        }
+
+        if (Array.isArray(cur)) {
+            const idx = parseInt(part, 10);
+            if (cur[idx] === undefined || cur[idx] === null) {
+                cur[idx] = !isNaN(Number(nextPart)) ? [] : {};
+            }
+            cur = cur[idx];
         } else {
-            dump.type = 'cc.Gradient';
-            dump.value = dump.default || { mode: 0 };
-            dump.alphaKeys = dump.alphaKeys || [];
-            dump.colorKeys = dump.colorKeys || [];
-        }
-        return;
-    }
-
-    // 3. Nested @ccclass struct (e.g. Test___Helper)
-    if (isNestedDump(dump.value)) {
-        for (const childKey of Object.keys(dump.value)) {
-            if (_ignores.includes(childKey)) continue;
-            const childDump = dump.value[childKey];
-            const childSaved = (vData && typeof vData === 'object') ? vData[childKey] : undefined;
-            populateDumpWithSaved(childDump, childSaved);
-        }
-        return;
-    }
-
-    // 4. Value types (Vec2, Vec3, Color, Rect, Size)
-    if (isValueType(dump)) {
-        if (dump.value && typeof dump.value === 'object' && vData && typeof vData === 'object') {
-            for (const k of Object.keys(dump.value)) {
-                let targetVal: number | undefined;
-                if (typeof vData[k] === 'number') {
-                    targetVal = vData[k];
-                }
-                if (targetVal !== undefined) {
-                    if (dump.value[k] && typeof dump.value[k] === 'object' && 'value' in dump.value[k]) {
-                        dump.value[k].value = targetVal;
-                    } else {
-                        dump.value[k] = targetVal;
-                    }
-                }
+            if (cur[part] === undefined || cur[part] === null) {
+                cur[part] = !isNaN(Number(nextPart)) ? [] : {};
             }
-        }
-        return;
-    }
-
-    // 5. Asset references (cc.Asset, Texture2D, Prefab, etc.)
-    if (isAssetType(dump)) {
-        let uuid = "";
-        if (typeof savedVal === 'string') {
-            uuid = savedVal;
-        } else if (savedVal && typeof savedVal === 'object') {
-            if (savedVal.__value__ && typeof savedVal.__value__ === 'object' && savedVal.__value__.uuid) {
-                uuid = savedVal.__value__.uuid;
-            } else if (typeof savedVal.__value__ === 'string') {
-                uuid = savedVal.__value__;
-            } else if (savedVal.uuid) {
-                uuid = savedVal.uuid;
-            }
-        }
-        dump.value = { uuid: uuid || "" };
-        return;
-    }
-
-    // 5b. Recover "Unknown" or missing dump type if saved value is an asset reference
-    if (dump.type === 'Unknown' || !dump.type) {
-        let uuid = "";
-        let typeName = "";
-        if (typeof savedVal === 'string' && (savedVal.includes('-') || savedVal.includes('@'))) {
-            uuid = savedVal;
-        } else if (savedVal && typeof savedVal === 'object') {
-            typeName = savedVal.__type__ || "";
-            if (savedVal.__value__ && typeof savedVal.__value__ === 'object' && savedVal.__value__.uuid) {
-                uuid = savedVal.__value__.uuid;
-            } else if (typeof savedVal.__value__ === 'string') {
-                uuid = savedVal.__value__;
-            } else if (savedVal.uuid) {
-                uuid = savedVal.uuid;
-            }
-        }
-        if (uuid || (typeName && (typeName.startsWith('pTSAsset') || typeName.includes('Asset')))) {
-            dump.type = typeName || 'cc.Asset';
-            dump.extends = ['cc.Asset', 'pTSAsset', typeName].filter(Boolean);
-            dump.value = { uuid: uuid || "" };
-            return;
+            cur = cur[part];
         }
     }
 
-    // 6. Primitives (Number, String, Boolean, Enum)
-    if (typeof vData !== 'undefined' && vData !== null) {
-        dump.value = vData;
-    } else {
-        if (typeof dump.default !== 'undefined' && dump.default !== null) {
-            dump.value = typeof dump.default === 'function' ? dump.default() : dump.default;
-        } else if (dump.type === 'Boolean') {
-            dump.value = false;
-        } else if (dump.type === 'Number' || dump.type === 'Enum') {
-            dump.value = 0;
-        } else if (dump.type === 'String') {
-            dump.value = "";
-        }
+    if (cur && typeof cur === 'object' && cur.__value__ && !Array.isArray(cur)) {
+        cur = cur.__value__;
+    }
+
+    const lastPart = parts[parts.length - 1];
+    if (Array.isArray(cur)) {
+        const idx = parseInt(lastPart, 10);
+        cur[idx] = valToSet;
+    } else if (cur && typeof cur === 'object') {
+        cur[lastPart] = valToSet;
     }
 }
 
-/**
- * Recursively extract serialized values from dump structure.
- * Wraps complex types in { __type__, __value__ } format.
- * Strips out Node and Component references entirely (sets to null).
- */
-export function extractDumpValue(dump: any): any {
-    if (!dump) return null;
-
-    if (dump.isArray) {
-        if (isNodeOrComponentArray(dump)) {
-            return [];
-        }
-        if (!Array.isArray(dump.value)) return [];
-        return dump.value.map((item: any) => extractDumpValue(item));
+function mergeDumpUuids(oldDumpNode: any, newDumpNode: any): void {
+    if (!oldDumpNode || !newDumpNode) return;
+    if (oldDumpNode.actualType && (!newDumpNode.actualType || newDumpNode.actualType === 'cc.Asset' || newDumpNode.actualType === 'pTSAsset')) {
+        newDumpNode.actualType = oldDumpNode.actualType;
     }
-
-    if (isNodeOrComponent(dump)) {
-        return null;
-    }
-
-    if (isRealCurve(dump)) {
-        const val = dump.value || {};
-        const rawKeyFrames = Array.isArray(val.keyFrames) ? val.keyFrames : [];
-        const keyFrames = rawKeyFrames.map((kf: any) => ({
-            time: typeof kf.time === 'number' ? kf.time : 0,
-            value: typeof kf.value === 'number' ? kf.value : 0,
-            inTangent: typeof kf.inTangent === 'number' ? kf.inTangent : (typeof kf.leftTangent === 'number' ? kf.leftTangent : 0),
-            outTangent: typeof kf.outTangent === 'number' ? kf.outTangent : (typeof kf.rightTangent === 'number' ? kf.rightTangent : 0),
-            inTangentWeight: typeof kf.inTangentWeight === 'number' ? kf.inTangentWeight : (typeof kf.leftTangentWeight === 'number' ? kf.leftTangentWeight : 1),
-            outTangentWeight: typeof kf.outTangentWeight === 'number' ? kf.outTangentWeight : (typeof kf.rightTangentWeight === 'number' ? kf.rightTangentWeight : 1),
-            interpMode: typeof kf.interpMode === 'number' ? kf.interpMode : (typeof kf.interpolationMode === 'number' ? kf.interpolationMode : 0),
-            tangentWeightMode: typeof kf.tangentWeightMode === 'number' ? kf.tangentWeightMode : 0
-        }));
-
-        return {
-            __type__: 'cc.RealCurve',
-            __value__: {
-                preExtrapolation: typeof val.preExtrapolation === 'number' ? val.preExtrapolation : 1,
-                postExtrapolation: typeof val.postExtrapolation === 'number' ? val.postExtrapolation : 1,
-                keyFrames
-            }
-        };
-    }
-
-    if (isGradient(dump)) {
-        let mode = 0;
-        if (dump.value && typeof dump.value === 'object') {
-            if (typeof dump.value.mode === 'number') {
-                mode = dump.value.mode;
-            } else if (dump.value.mode && typeof dump.value.mode.value === 'number') {
-                mode = dump.value.mode.value;
-            }
-        } else if (typeof dump.mode === 'number') {
-            mode = dump.mode;
-        }
-
-        const rawAlphaKeys = Array.isArray(dump.alphaKeys) 
-            ? dump.alphaKeys 
-            : (dump.value && Array.isArray(dump.value.alphaKeys) ? dump.value.alphaKeys : []);
-        const cleanAlphaKeys = rawAlphaKeys.map((ak: any) => ({
-            time: typeof ak.time === 'number' ? ak.time : 0,
-            alpha: typeof ak.alpha === 'number' ? ak.alpha : 255
-        }));
-
-        const rawColorKeys = Array.isArray(dump.colorKeys) 
-            ? dump.colorKeys 
-            : (dump.value && Array.isArray(dump.value.colorKeys) ? dump.value.colorKeys : []);
-        const cleanColorKeys = rawColorKeys.map((ck: any) => {
-            let colorVal = ck.color;
-            if (colorVal && typeof colorVal === 'object' && !Array.isArray(colorVal)) {
-                colorVal = [colorVal.r ?? 255, colorVal.g ?? 255, colorVal.b ?? 255];
-            } else if (!Array.isArray(colorVal)) {
-                colorVal = [255, 255, 255];
-            }
-            return {
-                time: typeof ck.time === 'number' ? ck.time : 0,
-                color: colorVal
-            };
-        });
-
-        return {
-            __type__: 'cc.Gradient',
-            __value__: {
-                mode,
-                alphaKeys: cleanAlphaKeys,
-                colorKeys: cleanColorKeys
-            }
-        };
-    }
-
-    if (isNestedDump(dump.value)) {
-        const out: Record<string, any> = {};
-        for (const k of Object.keys(dump.value)) {
-            if (_ignores.includes(k)) continue;
-            const childDump = dump.value[k];
-            out[k] = extractDumpValue(childDump);
-        }
-        return {
-            __type__: normalizeType(dump.type),
-            __value__: out
-        };
-    }
-
-    if (isValueType(dump)) {
-        const out: Record<string, number> = {};
-        if (dump.value && typeof dump.value === 'object') {
-            for (const k of Object.keys(dump.value)) {
-                const sub = dump.value[k];
-                if (typeof sub === 'number') {
-                    out[k] = sub;
-                } else if (sub && typeof sub === 'object' && typeof sub.value === 'number') {
-                    out[k] = sub.value;
-                } else if (sub && typeof sub === 'object' && typeof sub.default === 'number') {
-                    out[k] = sub.default;
-                } else {
-                    out[k] = 0;
-                }
+    if (oldDumpNode.isArray && Array.isArray(oldDumpNode.value) && newDumpNode.isArray && Array.isArray(newDumpNode.value)) {
+        for (let i = 0; i < oldDumpNode.value.length; i++) {
+            if (i < newDumpNode.value.length) {
+                mergeDumpUuids(oldDumpNode.value[i], newDumpNode.value[i]);
             }
         }
-        return {
-            __type__: normalizeType(dump.type),
-            __value__: out
-        };
+        return;
     }
-
-    if (isAssetType(dump)) {
-        const uuid = dump.value && typeof dump.value === 'object' 
-            ? dump.value.uuid 
-            : (typeof dump.value === 'string' ? dump.value : "");
-        if (!uuid) return null;
-        return {
-            __type__: normalizeType(dump.type),
-            __value__: { uuid }
-        };
+    if (oldDumpNode.value && typeof oldDumpNode.value === 'object' && newDumpNode.value && typeof newDumpNode.value === 'object') {
+        if ('uuid' in oldDumpNode.value && (!('uuid' in newDumpNode.value) || !newDumpNode.value.uuid)) {
+            newDumpNode.value.uuid = oldDumpNode.value.uuid;
+        }
+        for (const k of Object.keys(oldDumpNode.value)) {
+            if (k in newDumpNode.value && typeof oldDumpNode.value[k] === 'object') {
+                mergeDumpUuids(oldDumpNode.value[k], newDumpNode.value[k]);
+            }
+        }
     }
-
-    return dump.value !== undefined ? dump.value : dump.default;
-}
-
-export function collectValuesFromDump(dumpValue: any): Record<string, any> {
-    const result: Record<string, any> = {};
-    if (!dumpValue) return result;
-    for (const key of Object.keys(dumpValue)) {
-        if (_ignores.includes(key)) continue;
-        result[key] = extractDumpValue(dumpValue[key]);
-    }
-    return result;
 }
 
 function getCleanText(str: string): string {
@@ -1168,6 +798,18 @@ function syncUiAssetToDump(uiAsset: HTMLElement, rootDump: any = _lastDump): boo
         targetDump.value.uuid = val;
     } else {
         targetDump.value = { uuid: val };
+    }
+    if (val && typeof val === 'string') {
+        if (_uuidTypeCache.has(val)) {
+            targetDump.actualType = _uuidTypeCache.get(val);
+        } else {
+            Editor.Message.request('asset-db', 'query-asset-meta', val).then((meta: any) => {
+                if (meta?.userData?.__type__) {
+                    _uuidTypeCache.set(val, meta.userData.__type__);
+                    targetDump.actualType = meta.userData.__type__;
+                }
+            }).catch(() => {});
+        }
     }
     return true;
 }
@@ -1551,7 +1193,7 @@ function findEnumElement(path: any[]): HTMLElement | null {
         if (tag === 'UI-SELECT' || tag === 'UI-SELECT-PRO' || tag === 'SELECT') return node;
         if (node.classList && (node.classList.contains('ui-select') || node.classList.contains('cc-enum') || node.classList.contains('enum'))) return node;
         const dump = node.dump;
-        if (dump && (dump.type === 'Enum' || dump.type === 'cc.Enum')) return node;
+        if (dump && (dump.type === 'Enum' || dump.type === 'cc.Enum' || isEnumType(dump))) return node;
     }
     return null;
 }
@@ -1958,6 +1600,11 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             syncUiAssetToDump(assetEl, _lastDump);
         }
 
+        // Pre-save sweep: resolve all asset concrete subtypes
+        if (_lastDump && _lastDump.value) {
+            await resolveAllAssetSubtypes(_lastDump.value);
+        }
+
         // Update type if changed in UI
         if (this.$.ptsa && this.$.ptsa.value) {
             _cachedData.__type__ = this.$.ptsa.value;
@@ -2197,18 +1844,18 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             return;
         }
 
+        const parts = propPath.split('.');
+        const topKey = parts[0];
+        const targetDump = findDumpNodeByPath(_lastDump, propPath);
+
+        // Type coercion: if dump property is numeric, ensure newValue is converted from string to number
+        if (targetDump && (targetDump.type === 'Number' || targetDump.type === 'Integer' || targetDump.type === 'Float') && typeof newValue === 'string' && !isNaN(Number(newValue))) {
+            newValue = Number(newValue);
+        }
+
         // Live Preview Mode: ONLY update runtime instance in memory! NEVER write to disk!
         if (_isInLivePreviewMode) {
             console.log(`[pTS Inspector] Live Preview Mode: Applying runtime property change to memory: ${propPath} =`, newValue);
-
-            const parts = propPath.split('.');
-            const key = parts[0];
-            const targetDump = _lastDump?.value?.[key];
-
-            // Type coercion: if dump property is numeric, ensure newValue is converted from string to number
-            if (targetDump && (targetDump.type === 'Number' || targetDump.type === 'Integer' || targetDump.type === 'Float') && typeof newValue === 'string' && !isNaN(Number(newValue))) {
-                newValue = Number(newValue);
-            }
 
             // 1. Update _livePreviewValues in memory
             if (!_livePreviewValues) {
@@ -2217,37 +1864,29 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             applyLocalLiveValueChange(_livePreviewValues, propPath, newValue);
 
             // 2. Immediately update local dump node so UI is responsive
-            if (parts.length === 1) {
-                if (targetDump && targetDump.isArray) {
+            if (targetDump) {
+                if (targetDump.isArray) {
                     populateDumpWithSaved(targetDump, newValue);
-                    translateDump(targetDump.value, key);
-                } else if (targetDump) {
+                    translateDump(targetDump.value, propPath);
+                } else if (isEnumType(targetDump)) {
+                    targetDump.value = (newValue && typeof newValue === 'object' && 'uuid' in newValue) ? newValue.uuid : newValue;
+                } else if (isAssetType(targetDump)) {
+                    const uuid = typeof newValue === 'string' ? newValue : (newValue?.uuid || newValue?._uuid || '');
+                    targetDump.value = { uuid };
+                } else if (targetDump.value && typeof targetDump.value === 'object' && !Array.isArray(targetDump.value)) {
+                    populateDumpWithSaved(targetDump, newValue);
+                } else {
                     targetDump.value = newValue;
                 }
-                const propEl = panel.$.view.querySelector(`.pts-basic-prop[data-key="${key}"]`) as any;
-                if (propEl && propEl.render && targetDump) {
-                    propEl.dump = targetDump;
-                    propEl.render(targetDump);
-                }
-            } else if (parts.length === 2) {
-                const [arrKey, idxStr] = parts;
-                const idx = parseInt(idxStr, 10);
-                const arrayDump = _lastDump?.value?.[arrKey];
-                if (arrayDump && Array.isArray(arrayDump.value) && arrayDump.value[idx]) {
-                    const itemDump = arrayDump.value[idx];
-                    if (isAssetType(itemDump)) {
-                        const uuid = typeof newValue === 'string' ? newValue : (newValue?.uuid || '');
-                        itemDump.value = { uuid };
-                    } else {
-                        itemDump.value = newValue;
-                    }
-                }
-            } else if (parts.length === 3) {
-                const [arrKey, idxStr, subKey] = parts;
-                const idx = parseInt(idxStr, 10);
-                if (_lastDump?.value?.[arrKey]?.value?.[idx]?.value?.[subKey]) {
-                    _lastDump.value[arrKey].value[idx].value[subKey].value = newValue;
-                }
+            }
+
+            // Re-render top-level property element to reflect changes across all depths
+            const topPropEl = panel.$.view.querySelector(`.pts-basic-prop[data-key="${topKey}"]`) as any;
+            const topDump = _lastDump?.value?.[topKey];
+            if (topPropEl && topPropEl.render && topDump) {
+                topPropEl.dump = topDump;
+                topPropEl.render(topDump);
+                bindUiAssetEvents(topPropEl, () => {});
             }
 
             const info = {
@@ -2280,8 +1919,16 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                             _livePreviewValues = liveResult.values;
                         }
                         if (liveResult.dump && liveResult.dump.value) {
+                            mergeDumpUuids(_lastDump, liveResult.dump);
                             _lastDump = liveResult.dump;
                             translateDump(_lastDump.value, '');
+                            const topPropEl = panel.$.view.querySelector(`.pts-basic-prop[data-key="${topKey}"]`) as any;
+                            const topDump = _lastDump?.value?.[topKey];
+                            if (topPropEl && topPropEl.render && topDump) {
+                                topPropEl.dump = topDump;
+                                topPropEl.render(topDump);
+                                bindUiAssetEvents(topPropEl, () => {});
+                            }
                         }
                     }
                 }).catch(() => {});
@@ -2302,64 +1949,28 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             return;
         }
 
-        // Immediately update local dump node so UI is responsive
-        const parts = propPath.split('.');
-        if (parts.length === 1) {
-            const key = parts[0];
-            const targetDump = _lastDump?.value?.[key];
-            if (targetDump && targetDump.isArray) {
+        // --- Design Mode ---
+        // 1. Immediately update local dump node
+        if (targetDump) {
+            if (targetDump.isArray) {
                 populateDumpWithSaved(targetDump, newValue);
-                translateDump(targetDump.value, key);
-            } else if (targetDump) {
+                translateDump(targetDump.value, propPath);
+            } else if (isEnumType(targetDump)) {
+                targetDump.value = (newValue && typeof newValue === 'object' && 'uuid' in newValue) ? newValue.uuid : newValue;
+            } else if (isAssetType(targetDump)) {
+                const uuid = typeof newValue === 'string' ? newValue : (newValue?.uuid || newValue?._uuid || '');
+                targetDump.value = { uuid };
+            } else if (targetDump.value && typeof targetDump.value === 'object' && !Array.isArray(targetDump.value)) {
+                populateDumpWithSaved(targetDump, newValue);
+            } else {
                 targetDump.value = newValue;
             }
-            if (_cachedData.__value__) {
-                _cachedData.__value__[key] = newValue;
-            }
-        } else if (parts.length === 2) {
-            const [arrKey, idxStr] = parts;
-            const idx = parseInt(idxStr, 10);
-            const arrayDump = _lastDump?.value?.[arrKey];
-            if (arrayDump && Array.isArray(arrayDump.value) && arrayDump.value[idx]) {
-                const itemDump = arrayDump.value[idx];
-                if (isAssetType(itemDump)) {
-                    const uuid = typeof newValue === 'string' ? newValue : (newValue?.uuid || '');
-                    itemDump.value = { uuid };
-                } else {
-                    itemDump.value = newValue;
-                }
-            }
-            if (_cachedData.__value__) {
-                if (!Array.isArray(_cachedData.__value__[arrKey])) {
-                    _cachedData.__value__[arrKey] = [];
-                }
-                const rawArr = _cachedData.__value__[arrKey];
-                const arrayDump = _lastDump?.value?.[arrKey];
-                const itemDump = arrayDump?.value?.[idx];
-                if (itemDump && isAssetType(itemDump)) {
-                    const uuid = typeof newValue === 'string' ? newValue : (newValue?.uuid || '');
-                    const typeName = normalizeType(itemDump.type || itemDump.elementTypeData?.type || 'cc.Asset');
-                    rawArr[idx] = uuid ? { __type__: typeName, __value__: { uuid } } : null;
-                } else {
-                    rawArr[idx] = newValue;
-                }
-            }
-        } else if (parts.length === 3) {
-            const [arrKey, idxStr, subKey] = parts;
-            const idx = parseInt(idxStr, 10);
-            if (_lastDump?.value?.[arrKey]?.value?.[idx]?.value?.[subKey]) {
-                _lastDump.value[arrKey].value[idx].value[subKey].value = newValue;
-            }
-            if (_cachedData.__value__?.[arrKey]?.[idx]) {
-                const rawItem = _cachedData.__value__[arrKey][idx];
-                if (rawItem && typeof rawItem === 'object') {
-                    if (rawItem.__value__) {
-                        rawItem.__value__[subKey] = newValue;
-                    } else {
-                        rawItem[subKey] = newValue;
-                    }
-                }
-            }
+        }
+
+        // 2. Immediately update _cachedData.__value__
+        if (_cachedData.__value__) {
+            const valToSet = targetDump ? extractDumpValue(targetDump) : newValue;
+            updateCachedDataByPath(_cachedData.__value__, propPath, valToSet);
         }
 
         try {
@@ -2393,27 +2004,13 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
 
             if (changeResult.dump && changeResult.dump.value) {
                 if (_lastDump && _lastDump.value) {
-                    for (const k of Object.keys(_lastDump.value)) {
-                        const oldProp = _lastDump.value[k];
-                        const newProp = changeResult.dump.value[k];
-                        if (oldProp?.isArray && Array.isArray(oldProp.value) && newProp?.isArray && Array.isArray(newProp.value)) {
-                            for (let i = 0; i < oldProp.value.length; i++) {
-                                const oldItem = oldProp.value[i];
-                                const newItem = newProp.value[i];
-                                if (oldItem?.value?.uuid && (!newItem?.value || !newItem.value.uuid)) {
-                                    if (newItem) {
-                                        newItem.value = { uuid: oldItem.value.uuid };
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    mergeDumpUuids(_lastDump, changeResult.dump);
                 }
                 _lastDump = changeResult.dump;
                 translateDump(_lastDump.value, '');
             }
 
-            // 1. Update top-level enumLists if modified
+            // 3. Update top-level enumLists if modified
             if (changeResult.enumLists && _lastDump && _lastDump.value) {
                 for (const [propName, enumList] of Object.entries(changeResult.enumLists)) {
                     const dumpItem = _lastDump.value[propName];
@@ -2427,52 +2024,38 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 }
             }
 
-            // 2. Update backing fields (BEFORE re-rendering!)
+            // 4. Update backing fields (BEFORE re-rendering!)
             const lastProp = parts[parts.length - 1];
-            const backingKey = '_' + lastProp;
-            if (parts.length === 1) {
-                if (_lastDump && _lastDump.value && _lastDump.value[backingKey]) {
-                    _lastDump.value[backingKey].value = _cachedData.__value__[backingKey];
-                    const backingEl = panel.$.view.querySelector(`.pts-basic-prop[data-key="${backingKey}"]`) as any;
-                    if (backingEl && backingEl.render) {
-                        backingEl.render(_lastDump.value[backingKey]);
-                    }
-                }
-            } else if (parts.length === 3) {
-                const [arrKey, idxStr] = parts;
-                const idx = parseInt(idxStr, 10);
-                const arrayDump = _lastDump?.value?.[arrKey];
-                if (arrayDump && arrayDump.value && arrayDump.value[idx] && arrayDump.value[idx].value) {
-                    if (arrayDump.value[idx].value[backingKey]) {
-                        const rawItem = _cachedData.__value__[arrKey]?.[idx];
-                        const itemVal = rawItem?.__value__ || rawItem;
-                        if (itemVal && itemVal[backingKey] !== undefined) {
-                            arrayDump.value[idx].value[backingKey].value = itemVal[backingKey];
+            if (isNaN(Number(lastProp))) {
+                const backingKey = '_' + lastProp;
+                if (parts.length === 1) {
+                    if (_lastDump && _lastDump.value && _lastDump.value[backingKey]) {
+                        _lastDump.value[backingKey].value = _cachedData.__value__[backingKey];
+                        const backingEl = panel.$.view.querySelector(`.pts-basic-prop[data-key="${backingKey}"]`) as any;
+                        if (backingEl && backingEl.render) {
+                            backingEl.render(_lastDump.value[backingKey]);
                         }
                     }
                 }
             }
 
-            // 3. Re-render native array ui-prop if an array or array item was modified
-            const arrayKey = parts[0];
-            const arrayDump = _lastDump?.value?.[arrayKey];
-            if (arrayDump && arrayDump.isArray) {
-                const arrayPropEl = panel.$.view.querySelector(`.pts-basic-prop[data-key="${arrayKey}"]`) as any;
-                if (arrayPropEl && arrayPropEl.render) {
-                    arrayPropEl.dump = arrayDump;
-                    arrayPropEl.render(arrayDump);
-                    bindUiAssetEvents(arrayPropEl, () => {
-                        if (_currentTriggerAutoSave) _currentTriggerAutoSave();
-                    });
-                }
+            // 5. Re-render top-level property element to reflect changes across all depths
+            const topPropEl = panel.$.view.querySelector(`.pts-basic-prop[data-key="${topKey}"]`) as any;
+            const topDump = _lastDump?.value?.[topKey];
+            if (topPropEl && topPropEl.render && topDump) {
+                topPropEl.dump = topDump;
+                topPropEl.render(topDump);
+                bindUiAssetEvents(topPropEl, () => {
+                    if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                });
             }
 
-            // 4. Update visibility
+            // 6. Update visibility
             if (changeResult.visibility || changeResult.arrayVisibility) {
                 applyDumpVisibility(panel, changeResult.visibility, changeResult.arrayVisibility);
             }
 
-            // 5. Trigger auto-save to write to disk
+            // 7. Trigger auto-save to write to disk
             if (_currentTriggerAutoSave) {
                 _currentTriggerAutoSave();
             }
@@ -2697,8 +2280,19 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             populateDumpWithSaved(dumpOut.value[key], currentSaved[key]);
         }
 
-        // 4. Extract sanitized and complete values
-        const cleanValues = collectValuesFromDump(dumpOut.value);
+        // 3.5. Resolve all asset concrete subtypes asynchronously before collecting values
+        await resolveAllAssetSubtypes(dumpOut.value);
+
+        // 4. Extract sanitized and complete values (stripping readonly getters and @editor_property debug props)
+        const cleanValues = collectValuesFromDump(dumpOut.value, dumpOut.__getters__);
+        if (cleanValues) {
+            for (const k of Object.keys(cleanValues)) {
+                const item = dumpOut.value?.[k];
+                if (item?.isEditorProp || item?.group?.name === '_Debugger' || dumpOut.__getters__?.[k]?.readonly) {
+                    delete cleanValues[k];
+                }
+            }
+        }
 
         // 5. Update _cachedData and save .pts asset
         _cachedData = {

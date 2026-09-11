@@ -190,6 +190,16 @@
                     "pts_updater"
                 ]
             },
+            "fix-all-pts-assets": {
+                "methods": [
+                    "fixAllPtsAssets"
+                ]
+            },
+            "fix-pts-for-script": {
+                "methods": [
+                    "fixPtsForScript"
+                ]
+            },
             "scene:ready": {
                 "methods": [
                     "onSceneReady"
