@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { UUID_PATTERN } from './pts-fixer';
 
 declare const Editor: any;
 
@@ -417,7 +418,7 @@ export function rescanAndSyncLazyPrefab(): LazySyncReport {
         if (!info || !info.depends) continue;
 
         for (const depUuid of info.depends) {
-            if (!depUuid || typeof depUuid !== 'string') continue;
+            if (!depUuid || typeof depUuid !== 'string' || !UUID_PATTERN.test(depUuid)) continue;
             neededDependencies.add(depUuid);
 
             // If this dependency is also a .pts asset, continue traversal

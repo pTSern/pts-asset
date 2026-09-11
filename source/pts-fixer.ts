@@ -106,6 +106,8 @@ export function isNodeOrComponentArray(dump: any): boolean {
     return false;
 }
 
+export const UUID_PATTERN = /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{32})(@[0-9a-zA-Z_-]+)?$/;
+
 export function isEnumType(dump: any): boolean {
     if (!dump) return false;
     if (dump.type === 'Enum' || dump.type === 'cc.Enum' || dump.actualType === 'Enum') return true;
@@ -118,10 +120,18 @@ export function isAssetType(dump: any): boolean {
     if (isNodeOrComponent(dump)) return false;
     if (isEnumType(dump)) return false;
     if (dump.type === 'String' || dump.type === 'Number' || dump.type === 'Integer' || dump.type === 'Float' || dump.type === 'Boolean') return false;
+    if (dump.actualType === 'String' || dump.actualType === 'Number' || dump.actualType === 'Integer' || dump.actualType === 'Float' || dump.actualType === 'Boolean') return false;
     if (dump.actualType === 'Enum') return false;
     if (dump.extends?.includes('cc.Asset') || dump.type === 'cc.Asset') return true;
-    if (dump.actualType && dump.actualType !== 'cc.Asset' && dump.actualType !== 'pTSAsset' && dump.actualType !== 'Enum') return true;
-    if (dump.value && typeof dump.value === 'object' && ('uuid' in dump.value || '_uuid' in dump.value)) return true;
+    if (dump.actualType && dump.actualType !== 'cc.Asset' && dump.actualType !== 'pTSAsset' && dump.actualType !== 'Enum') {
+        if (dump.extends?.some((e: string) => e.includes('Asset'))) return true;
+        if (dump.actualType.endsWith('Asset') || dump.actualType.startsWith('pTSAsset') || dump.actualType.includes('SpriteFrame') || dump.actualType.includes('Texture') || dump.actualType.includes('Prefab')) return true;
+        return false;
+    }
+    if (dump.value && typeof dump.value === 'object' && ('uuid' in dump.value || '_uuid' in dump.value)) {
+        const u = dump.value.uuid || dump.value._uuid;
+        if (typeof u === 'string' && (UUID_PATTERN.test(u) || u === '')) return true;
+    }
     return false;
 }
 
@@ -136,10 +146,18 @@ export function extractAssetDependencies(val: any, out: Set<string> = new Set())
         return Array.from(out);
     }
 
+    if (val.__type__ === 'String' || val.__type__ === 'Number' || val.__type__ === 'Boolean' || val.__type__ === 'Enum') {
+        return Array.from(out);
+    }
+
     if (val.__value__ && typeof val.__value__ === 'object' && typeof val.__value__.uuid === 'string' && val.__value__.uuid) {
-        out.add(val.__value__.uuid);
+        if (UUID_PATTERN.test(val.__value__.uuid)) {
+            out.add(val.__value__.uuid);
+        }
     } else if (typeof val.uuid === 'string' && val.uuid) {
-        out.add(val.uuid);
+        if (UUID_PATTERN.test(val.uuid)) {
+            out.add(val.uuid);
+        }
     }
 
     for (const k of Object.keys(val)) {
@@ -389,29 +407,30 @@ export function populateDumpWithSaved(dump: any, savedVal: any) {
 
     // 8. Asset references (cc.Asset, Texture2D, Prefab, pTSAsset, concrete subclasses, etc.)
     const isPrimitiveType = dump.type === 'String' || dump.type === 'Number' || dump.type === 'Integer' ||
-        dump.type === 'Float' || dump.type === 'Boolean' || isEnumType(dump);
+        dump.type === 'Float' || dump.type === 'Boolean' || isEnumType(dump) ||
+        dump.actualType === 'String' || dump.actualType === 'Number' || dump.actualType === 'Integer' ||
+        dump.actualType === 'Float' || dump.actualType === 'Boolean' ||
+        (typeof savedVal === 'string' && !UUID_PATTERN.test(savedVal));
 
-    const UUID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(@[0-9a-zA-Z_-]+)?$/;
     const isStrictUuid = (val: any) => typeof val === 'string' && !val.includes('/') && !val.includes('\\') && UUID_PATTERN.test(val);
 
     const savedUuid = isStrictUuid(savedVal)
         ? savedVal
         : (savedVal && typeof savedVal === 'object' ? (savedVal.uuid || savedVal._uuid || savedVal.__value__?.uuid || savedVal.__value__?._uuid) : '');
+    const validSavedUuid = (typeof savedUuid === 'string' && UUID_PATTERN.test(savedUuid)) ? savedUuid : '';
     const savedType = (savedVal && typeof savedVal === 'object' && savedVal.__type__ !== 'Enum') ? savedVal.__type__ : '';
 
-    if (!isPrimitiveType && (savedUuid || isAssetType(dump) || dump.type === 'Unknown' || !dump.type)) {
-        if (savedUuid || isAssetType(dump)) {
-            const uuid = savedUuid || (dump.value && typeof dump.value === 'object' ? (dump.value.uuid || dump.value._uuid) : '');
-            const typeName = savedType || dump.actualType || (dump.type !== 'Unknown' && dump.type !== 'Enum' ? dump.type : '') || 'cc.Asset';
-            dump.type = typeName;
-            dump.actualType = typeName;
-            dump.extends = Array.from(new Set([...(dump.extends || []), 'cc.Asset', 'pTSAsset', typeName]));
-            dump.value = { uuid: uuid || "" };
-            if (uuid && typeName && typeName !== 'cc.Asset' && typeName !== 'pTSAsset' && typeName !== 'Enum') {
-                _uuidTypeCache.set(uuid, typeName);
-            }
-            return;
+    if (!isPrimitiveType && (validSavedUuid || isAssetType(dump))) {
+        const uuid = validSavedUuid || (dump.value && typeof dump.value === 'object' ? (dump.value.uuid || dump.value._uuid) : '');
+        const typeName = savedType || dump.actualType || (dump.type !== 'Unknown' && dump.type !== 'Enum' ? dump.type : '') || 'cc.Asset';
+        dump.type = typeName;
+        dump.actualType = typeName;
+        dump.extends = Array.from(new Set([...(dump.extends || []), 'cc.Asset', 'pTSAsset', typeName]));
+        dump.value = { uuid: uuid || "" };
+        if (uuid && typeName && typeName !== 'cc.Asset' && typeName !== 'pTSAsset' && typeName !== 'Enum') {
+            _uuidTypeCache.set(uuid, typeName);
         }
+        return;
     }
 
     // 9. Primitives (Number, String, Boolean, Enum)
@@ -653,6 +672,9 @@ export function extractDumpValue(dump: any): any {
             ? dump.value.uuid 
             : (typeof dump.value === 'string' ? dump.value : "");
         if (!uuid) return null;
+        if (!UUID_PATTERN.test(uuid)) {
+            return dump.value !== undefined ? dump.value : dump.default;
+        }
         const resolvedType = dump.actualType || _uuidTypeCache.get(uuid) || normalizeType(dump.type);
         return {
             __type__: resolvedType,

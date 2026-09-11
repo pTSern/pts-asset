@@ -338,7 +338,7 @@ function _loadAssetByUuid(uuid: string, target?: any, propKey?: string): Promise
 
         // 3. Sub-assets without known bundle: avoid root 404
         const owningBundle = bundleMapCache.get(uuid) || bundleMapCache.get(uuid.split('@')[0]);
-        if (uuid.includes('@') && !owningBundle && !_isUuidInAnyLoadedBundle(uuid)) {
+        if (BUILD && uuid.includes('@') && !owningBundle && !_isUuidInAnyLoadedBundle(uuid)) {
             return null;
         }
 
@@ -363,15 +363,6 @@ function _loadAssetByUuid(uuid: string, target?: any, propKey?: string): Promise
             }
         }
 
-        const canLoadDirectly = _isUuidInAnyLoadedBundle(uuid);
-        if (!canLoadDirectly && !owningBundle) {
-            if (target && propKey) {
-                _pendingAssetRefs.push({ target, propKey, uuid });
-            }
-            console.warn(`[pTSAsset] Dependency asset "${uuid}" belongs to an unknown/unloaded bundle. Deferred.`);
-            return null;
-        }
-
         // 6. If bundle is loaded (or _$secret/root), call assetManager.loadAny
         return new Promise<Asset | null>((resolve) => {
             if (typeof assetManager === 'undefined' || typeof assetManager.loadAny !== 'function') {
@@ -387,7 +378,10 @@ function _loadAssetByUuid(uuid: string, target?: any, propKey?: string): Promise
                 _visitingUuids.delete(uuid);
 
                 if (err) {
-                    console.error(`[pTSAsset] Failed to load dependency asset (uuid: ${uuid}):`, err);
+                    console.warn(`[pTSAsset] Failed to load dependency asset (uuid: ${uuid}):`, err);
+                    if (target && propKey) {
+                        _pendingAssetRefs.push({ target, propKey, uuid, bundleName: owningBundle });
+                    }
                     resolve(null);
                     return;
                 }
@@ -669,27 +663,33 @@ function _resolveValue(val: any, expectedCtor?: any, target?: any, propKey?: str
     }
 
     if (__type__) {
+        const cls = (js.getClassByName(__type__) || expectedCtor) as any;
+        const isAsset = __type__ === 'cc.Asset' || __type__ === 'pTSAsset'
+            || (cls && (js.isChildClassOf(cls, Asset) || cls === Asset))
+            || (typeof expectedCtor === 'function' && (js.isChildClassOf(expectedCtor, Asset) || expectedCtor === Asset));
+
         // Asset references: { __type__, __value__: { uuid: "..." } } or { __type__, __value__: "uuid" }
-        const uuid = (__value__ && typeof __value__ === 'object' && typeof __value__.uuid === 'string')
-            ? __value__.uuid
-            : (typeof __value__ === 'string' && __value__.includes('-') ? __value__ : null);
+        if (isAsset) {
+            const uuid = (__value__ && typeof __value__ === 'object' && typeof __value__.uuid === 'string')
+                ? __value__.uuid
+                : (typeof __value__ === 'string' && __value__.includes('-') ? __value__ : null);
 
-        if (uuid) {
-            const loaded = _findAssetByUuid(uuid);
+            if (uuid) {
+                const loaded = _findAssetByUuid(uuid);
 
-            if (target && propKey) {
-                _setupAssetLazyGetter(target, propKey, uuid);
+                if (target && propKey) {
+                    _setupAssetLazyGetter(target, propKey, uuid);
+                }
+
+                const p = _loadAssetByUuid(uuid, target, propKey);
+                if (depsOut) {
+                    depsOut.push(p);
+                }
+
+                return loaded || null;
             }
-
-            const p = _loadAssetByUuid(uuid, target, propKey);
-            if (depsOut) {
-                depsOut.push(p);
-            }
-
-            return loaded || null;
         }
 
-        const cls = (js.getClassByName(__type__) || expectedCtor) as any;
         if (!cls) {
             console.warn(`[pTSAsset] Class "${__type__}" not found in cc.js registry`);
             return __value__ !== undefined ? __value__ : val;
@@ -1034,9 +1034,8 @@ if (!assetManager.pipeline[__seal_]) {
 
                 const _is_pTSNative = (_asset as any)._native === _$tail;
                 const _is_pTSAsset = _asset instanceof pTSAsset;
-                const _has_pTSData = !!(_asset as any).json?.__type__;
 
-                if ((_is_pTSNative || _is_pTSAsset || _has_pTSData) && !(_asset as any)[__hydrated_]) {
+                if ((_is_pTSNative || _is_pTSAsset) && !(_asset as any)[__hydrated_]) {
                     const _pTSData = (_asset as any)._nativeAsset || (_asset as any).json;
                     if (_pTSData) {
                         _hydrate(_asset as any, _pTSData);
