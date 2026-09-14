@@ -121,11 +121,12 @@ export interface PtsAssetInfo {
     filePath: string;
     depends: string[];
     isLazy?: boolean;
+    isForceLazy?: boolean;
 }
 
 export interface LazySyncReport {
     totalPts: number;
-    liveRootPts: Array<{ file: string; uuid: string; isManualLazy?: boolean }>;
+    liveRootPts: Array<{ file: string; uuid: string; isManualLazy?: boolean; isForceLazy?: boolean }>;
     addedToLazy: Array<{ file?: string; uuid: string }>;
     skippedAlreadyReferenced: string[];
     deadPts: Array<{ file: string; uuid: string }>;
@@ -284,6 +285,7 @@ export function rescanAndSyncLazyPrefab(): LazySyncReport {
         let uuid = '';
         let depends: string[] = [];
         let isLazy = false;
+        let isForceLazy = false;
         const metaPath = `${ptsFile}.meta`;
 
         if (fs.existsSync(metaPath)) {
@@ -292,6 +294,9 @@ export function rescanAndSyncLazyPrefab(): LazySyncReport {
                 uuid = meta.uuid;
                 if (meta?.userData?.isLazy === true) {
                     isLazy = true;
+                }
+                if (meta?.userData?.isForceLazy === true || meta?.userData?.forceLazy === true || meta?.userData?.['force-lazy'] === true) {
+                    isForceLazy = true;
                 }
                 if (Array.isArray(meta?.userData?.__depends__)) {
                     depends = meta.userData.__depends__;
@@ -321,7 +326,8 @@ export function rescanAndSyncLazyPrefab(): LazySyncReport {
                 file: path.basename(ptsFile),
                 filePath: ptsFile,
                 depends,
-                isLazy
+                isLazy,
+                isForceLazy: isLazy && isForceLazy
             });
         }
     }
@@ -394,16 +400,21 @@ export function rescanAndSyncLazyPrefab(): LazySyncReport {
     // 7. Find live root .pts assets:
     // (a) Directly referenced in a scene or live prefab, OR located inside an asset bundle
     // (b) Manually marked as lazy root (meta.userData.isLazy === true)
-    const liveRootPts: Array<{ file: string; uuid: string; isManualLazy?: boolean }> = [];
+    // (c) Manually marked as force-lazy (both isLazy and isForceLazy === true)
+    const liveRootPts: Array<{ file: string; uuid: string; isManualLazy?: boolean; isForceLazy?: boolean }> = [];
     const manualLazyRoots = new Set<string>();
+    const forceLazyAssets = new Set<string>();
 
     for (const [uuid, info] of ptsCache.entries()) {
         const isExt = externalRefs.has(uuid) || isInsideBundle(info.filePath);
         if (isExt || info.isLazy) {
-            liveRootPts.push({ file: info.file, uuid, isManualLazy: info.isLazy });
+            liveRootPts.push({ file: info.file, uuid, isManualLazy: info.isLazy, isForceLazy: info.isForceLazy });
             if (info.isLazy && !isExt) {
                 manualLazyRoots.add(uuid);
             }
+        }
+        if (info.isLazy && info.isForceLazy) {
+            forceLazyAssets.add(uuid);
         }
     }
 
@@ -432,23 +443,25 @@ export function rescanAndSyncLazyPrefab(): LazySyncReport {
     // 9. Partition candidates: already protected vs needs protection in _lazy.prefab
     // Candidates to protect in _lazy.prefab:
     // - manualLazyRoots: any .pts marked isLazy without an external scene/bundle ref
+    // - forceLazyAssets: any .pts marked both isLazy and isForceLazy (ALWAYS added to _lazy.prefab!)
     // - neededDependencies: all transitive dependencies required by live roots (including spriteframes, json, audio, etc.)
-    const candidates = new Set<string>([...manualLazyRoots, ...neededDependencies]);
+    const candidates = new Set<string>([...manualLazyRoots, ...forceLazyAssets, ...neededDependencies]);
 
     const addedToLazy: Array<{ file?: string; uuid: string }> = [];
     const skippedAlreadyReferenced: string[] = [];
 
     for (const candUuid of candidates) {
+        const isForce = forceLazyAssets.has(candUuid);
         const assetMeta = assetUuidMap.get(candUuid);
         const inBundle = assetMeta ? isInsideBundle(assetMeta.path) : false;
         const baseUuid = candUuid.split('@')[0];
         const inLiveExternal = externalRefs.has(candUuid) || externalRefs.has(baseUuid);
 
-        if (inLiveExternal || inBundle) {
+        if ((inLiveExternal || inBundle) && !isForce) {
             // Already referenced in live scene/prefab or safe in an asset bundle!
             skippedAlreadyReferenced.push(candUuid);
         } else {
-            // Unprotected asset -> MUST add to _lazy.prefab to prevent dead asset culling!
+            // Unprotected asset OR force-lazy asset -> MUST add to _lazy.prefab!
             const ptsInfo = ptsCache.get(candUuid);
             const label = ptsInfo
                 ? ptsInfo.file
