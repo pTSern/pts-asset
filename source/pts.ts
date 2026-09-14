@@ -41,10 +41,11 @@ import {
     resolveAllAssetSubtypes,
     extractDumpValue,
     collectValuesFromDump,
+    isEditorPropItem,
     fixSinglePtsAsset
 } from './pts-fixer';
 
-export { extractAssetDependencies, extractDumpValue, collectValuesFromDump, populateDumpWithSaved, isEnumType };
+export { extractAssetDependencies, extractDumpValue, collectValuesFromDump, populateDumpWithSaved, isEnumType, isEditorPropItem };
 import { AssetInfo } from '@cocos/creator-types/editor/packages/asset-db/@types/public'
 import fs from 'fs'
 interface Asset {
@@ -95,6 +96,7 @@ export const $ = {
     save: "#save-button",
     fix: "#fix-button",
     lazyToggle: "#lazy-toggle",
+    forceLazyToggle: "#force-lazy-toggle",
     jsonToggle: "#json-toggle",
     jsonDisplay: "#json-display",
     previewBanner: "#preview-banner",
@@ -159,6 +161,7 @@ export const template = `
         <ui-button id="save-button" class="blue" style="flex: 1;">Save Changes</ui-button>
         <ui-button id="fix-button" class="orange" style="width: 80px;">Fix</ui-button>
         <ui-checkbox id="lazy-toggle" style="margin-left: 4px;" tooltip="Keep this asset alive in _lazy.prefab along with unreferenced dependencies">Lazy</ui-checkbox>
+        <ui-checkbox id="force-lazy-toggle" style="margin-left: 4px; display: none;" tooltip="Force add this .pts asset directly into _lazy.prefab regardless of external or bundle references">Force Lazy</ui-checkbox>
     </div>
     <div style="flex: 1; overflow-y: auto; padding: 10px;">
         <ui-section class="component config" cache-expand="node-component:pTS" expand>
@@ -184,6 +187,7 @@ let _currentAsset: Asset | null = null;
 let _lastDump: any = null;
 let _isUpdatingUi = false;
 let _lastLazyState: boolean | null = null;
+let _lastForceLazyState: boolean | null = null;
 let _isInLivePreviewMode = false;
 let _previewPollTimer: any = null;
 let _livePreviewValues: Record<string, any> | null = null;
@@ -249,6 +253,17 @@ function setPreviewModeUI(panel: PanelThis, isPreview: boolean, foundInstance: b
             panel.$.lazyToggle.removeAttribute('disabled');
             panel.$.lazyToggle.disabled = false;
             panel.$.lazyToggle.style.opacity = '1';
+        }
+    }
+    if (panel.$.forceLazyToggle) {
+        if (isPreview) {
+            panel.$.forceLazyToggle.setAttribute('disabled', 'true');
+            panel.$.forceLazyToggle.disabled = true;
+            panel.$.forceLazyToggle.style.opacity = '0.4';
+        } else {
+            panel.$.forceLazyToggle.removeAttribute('disabled');
+            panel.$.forceLazyToggle.disabled = false;
+            panel.$.forceLazyToggle.style.opacity = '1';
         }
     }
 }
@@ -1131,12 +1146,26 @@ function setupLazyToggle(panel: PanelThis) {
     if (!panel.$.lazyToggle || panel.$.lazyToggle.__pts_bound__) return;
     panel.$.lazyToggle.__pts_bound__ = true;
 
+    const updateForceLazyDisplay = (isLazy: boolean) => {
+        if (panel.$.forceLazyToggle) {
+            panel.$.forceLazyToggle.style.display = isLazy ? 'inline-flex' : 'none';
+        }
+    };
+
     const onLazyToggleChanged = async () => {
         if (_isInLivePreviewMode) return;
         if (_isUpdatingUi || !_currentAsset) return;
         const newLazy = !!(panel.$.lazyToggle.value || panel.$.lazyToggle.checked);
         if (newLazy === _lastLazyState) return;
         _lastLazyState = newLazy;
+
+        updateForceLazyDisplay(newLazy);
+
+        if (!newLazy && panel.$.forceLazyToggle) {
+            panel.$.forceLazyToggle.value = false;
+            panel.$.forceLazyToggle.checked = false;
+            _lastForceLazyState = false;
+        }
 
         console.log(`[pTS Inspector] Lazy toggle changed for ${_currentAsset.displayName} (${_currentAsset.uuid}): ${newLazy}`);
 
@@ -1145,12 +1174,20 @@ function setupLazyToggle(panel: PanelThis) {
             if (meta) {
                 meta.userData = meta.userData || {};
                 meta.userData.isLazy = newLazy;
+                if (!newLazy) {
+                    meta.userData.isForceLazy = false;
+                    meta.userData.forceLazy = false;
+                }
                 await Editor.Message.request('asset-db', 'save-asset-meta', _currentAsset.uuid, JSON.stringify(meta));
                 console.log(`[pTS Inspector] Saved meta isLazy=${newLazy} for ${_currentAsset.displayName}`);
             }
             if (panel.metaList && panel.metaList[0]) {
                 panel.metaList[0].userData = panel.metaList[0].userData || {};
                 panel.metaList[0].userData.isLazy = newLazy;
+                if (!newLazy) {
+                    panel.metaList[0].userData.isForceLazy = false;
+                    panel.metaList[0].userData.forceLazy = false;
+                }
             }
         } catch (e) {
             console.error('[pTS Inspector] Failed to update meta.userData.isLazy:', e);
@@ -1164,8 +1201,49 @@ function setupLazyToggle(panel: PanelThis) {
         }
     };
 
+    const onForceLazyToggleChanged = async () => {
+        if (_isInLivePreviewMode) return;
+        if (_isUpdatingUi || !_currentAsset) return;
+        const newForceLazy = !!(panel.$.forceLazyToggle.value || panel.$.forceLazyToggle.checked);
+        if (newForceLazy === _lastForceLazyState) return;
+        _lastForceLazyState = newForceLazy;
+
+        console.log(`[pTS Inspector] Force Lazy toggle changed for ${_currentAsset.displayName} (${_currentAsset.uuid}): ${newForceLazy}`);
+
+        try {
+            const meta = await Editor.Message.request('asset-db', 'query-asset-meta', _currentAsset.uuid);
+            if (meta) {
+                meta.userData = meta.userData || {};
+                meta.userData.isForceLazy = newForceLazy;
+                meta.userData.forceLazy = newForceLazy;
+                await Editor.Message.request('asset-db', 'save-asset-meta', _currentAsset.uuid, JSON.stringify(meta));
+                console.log(`[pTS Inspector] Saved meta isForceLazy=${newForceLazy} for ${_currentAsset.displayName}`);
+            }
+            if (panel.metaList && panel.metaList[0]) {
+                panel.metaList[0].userData = panel.metaList[0].userData || {};
+                panel.metaList[0].userData.isForceLazy = newForceLazy;
+                panel.metaList[0].userData.forceLazy = newForceLazy;
+            }
+        } catch (e) {
+            console.error('[pTS Inspector] Failed to update meta.userData.isForceLazy:', e);
+        }
+
+        try {
+            const report = await Editor.Message.request('pts-asset', 'sync-lazy-prefab');
+            console.log('[pTS Inspector] Lazy Prefab Synced after force-lazy toggle:', report);
+        } catch (e) {
+            console.error('[pTS Inspector] Failed to sync lazy prefab:', e);
+        }
+    };
+
     panel.$.lazyToggle.addEventListener('change', onLazyToggleChanged);
     panel.$.lazyToggle.addEventListener('confirm', onLazyToggleChanged);
+
+    if (panel.$.forceLazyToggle && !panel.$.forceLazyToggle.__pts_bound__) {
+        panel.$.forceLazyToggle.__pts_bound__ = true;
+        panel.$.forceLazyToggle.addEventListener('change', onForceLazyToggleChanged);
+        panel.$.forceLazyToggle.addEventListener('confirm', onForceLazyToggleChanged);
+    }
 }
 
 function findAssetElement(path: any[]): HTMLElement | null {
@@ -1462,7 +1540,16 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         if (this.$.lazyToggle) {
             const isLazy = !!(this.metaList && this.metaList[0]?.userData?.isLazy);
             this.$.lazyToggle.value = isLazy;
+            this.$.lazyToggle.checked = isLazy;
             _lastLazyState = isLazy;
+
+            if (this.$.forceLazyToggle) {
+                const isForceLazy = isLazy && !!(this.metaList && (this.metaList[0]?.userData?.isForceLazy || this.metaList[0]?.userData?.forceLazy || this.metaList[0]?.userData?.['force-lazy']));
+                this.$.forceLazyToggle.value = isForceLazy;
+                this.$.forceLazyToggle.checked = isForceLazy;
+                this.$.forceLazyToggle.style.display = isLazy ? 'inline-flex' : 'none';
+                _lastForceLazyState = isForceLazy;
+            }
         }
     } finally {
         _isUpdatingUi = false;
@@ -1621,11 +1708,14 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             const dump = el.dump || (_lastDump?.value && _lastDump.value[key]);
             if (dump) {
                 const propName = dump.name || key;
+                if (isEditorPropItem(dump, propName, _lastDump?.__editor_props__)) {
+                    return;
+                }
                 const getterInfo = _lastDump?.__getters__?.[propName];
                 if (getterInfo && getterInfo.readonly) {
                     return;
                 }
-                _cachedData.__value__[propName] = extractDumpValue(dump);
+                _cachedData.__value__[propName] = extractDumpValue(dump, _lastDump?.__editor_props__);
             }
         });
 
@@ -1653,14 +1743,16 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             }
         }
 
-        // Preserve any properties from _lastDump.value not captured in DOM (excluding readonly getters)
+        // Preserve any properties from _lastDump.value not captured in DOM (excluding readonly getters and editor props)
         if (_lastDump && _lastDump.value) {
             for (const key of Object.keys(_lastDump.value)) {
                 if (_ignores.includes(key)) continue;
+                const item = _lastDump.value[key];
+                if (isEditorPropItem(item, key, _lastDump.__editor_props__)) continue;
                 const getterInfo = _lastDump?.__getters__?.[key];
                 if (getterInfo && getterInfo.readonly) continue;
                 if (!(_cachedData.__value__.hasOwnProperty(key))) {
-                    _cachedData.__value__[key] = extractDumpValue(_lastDump.value[key]);
+                    _cachedData.__value__[key] = extractDumpValue(item, _lastDump.__editor_props__);
                 }
             }
         }
@@ -1694,7 +1786,8 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         // Strip any internal engine, lifecycle, ignored, or editor_property debug fields from __value__
         if (_cachedData && _cachedData.__value__) {
             for (const k of Object.keys(_cachedData.__value__)) {
-                if (_ignores.includes(k) || k.startsWith('__') || _lastDump?.value?.[k]?.isEditorProp || _lastDump?.value?.[k]?.group?.name === '_Debugger') {
+                const item = _lastDump?.value?.[k];
+                if (_ignores.includes(k) || k.startsWith('__') || isEditorPropItem(item, k, _lastDump?.__editor_props__)) {
                     delete _cachedData.__value__[k];
                 }
             }
@@ -1722,7 +1815,13 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 meta.userData.__depends__ = depends;
                 delete meta.userData.depends;
                 if (this.$.lazyToggle) {
-                    meta.userData.isLazy = !!(this.$.lazyToggle.value || this.$.lazyToggle.checked);
+                    const isL = !!(this.$.lazyToggle.value || this.$.lazyToggle.checked);
+                    meta.userData.isLazy = isL;
+                    if (this.$.forceLazyToggle) {
+                        const isF = isL && !!(this.$.forceLazyToggle.value || this.$.forceLazyToggle.checked);
+                        meta.userData.isForceLazy = isF;
+                        meta.userData.forceLazy = isF;
+                    }
                 }
                 await Editor.Message.request('asset-db', 'save-asset-meta', _currentAsset.uuid, JSON.stringify(meta));
                 console.log(`[pTS Inspector] Saved meta with __depends__:`, depends);
@@ -1994,8 +2093,10 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
 
             if (changeResult.values) {
                 const cleanValues: Record<string, any> = {};
+                const epMap = changeResult.dump?.__editor_props__ || _lastDump?.__editor_props__;
                 for (const k of Object.keys(changeResult.values)) {
-                    if (!_ignores.includes(k) && !k.startsWith('__')) {
+                    const item = changeResult.dump?.value?.[k] || _lastDump?.value?.[k];
+                    if (!_ignores.includes(k) && !k.startsWith('__') && !isEditorPropItem(item, k, epMap)) {
                         cleanValues[k] = changeResult.values[k];
                     }
                 }
@@ -2284,11 +2385,11 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         await resolveAllAssetSubtypes(dumpOut.value);
 
         // 4. Extract sanitized and complete values (stripping readonly getters and @editor_property debug props)
-        const cleanValues = collectValuesFromDump(dumpOut.value, dumpOut.__getters__);
+        const cleanValues = collectValuesFromDump(dumpOut.value, dumpOut.__getters__, dumpOut.__editor_props__);
         if (cleanValues) {
             for (const k of Object.keys(cleanValues)) {
                 const item = dumpOut.value?.[k];
-                if (item?.isEditorProp || item?.group?.name === '_Debugger' || dumpOut.__getters__?.[k]?.readonly) {
+                if (isEditorPropItem(item, k, dumpOut.__editor_props__) || dumpOut.__getters__?.[k]?.readonly) {
                     delete cleanValues[k];
                 }
             }
@@ -2318,7 +2419,13 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 meta.userData.__depends__ = depends;
                 delete meta.userData.depends;
                 if (this.$.lazyToggle) {
-                    meta.userData.isLazy = !!(this.$.lazyToggle.value || this.$.lazyToggle.checked);
+                    const isL = !!(this.$.lazyToggle.value || this.$.lazyToggle.checked);
+                    meta.userData.isLazy = isL;
+                    if (this.$.forceLazyToggle) {
+                        const isF = isL && !!(this.$.forceLazyToggle.value || this.$.forceLazyToggle.checked);
+                        meta.userData.isForceLazy = isF;
+                        meta.userData.forceLazy = isF;
+                    }
                 }
                 await Editor.Message.request('asset-db', 'save-asset-meta', _currentAsset.uuid, JSON.stringify(meta));
                 console.log(`[pTS Inspector] Fixed meta userData.__type__ = "${targetType}", __depends__=`, depends);
@@ -2408,4 +2515,6 @@ export function close(this: PanelThis) {
     _currentAsset = null;
     _cachedData = null;
     _lastDump = null;
+    _lastLazyState = null;
+    _lastForceLazyState = null;
 }

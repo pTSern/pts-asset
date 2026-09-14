@@ -345,7 +345,7 @@ export async function createAndInitPtsAsset(assetInfo: MenuAssetInfo | undefined
                 args: [className]
             });
             if (dumpOut && dumpOut.value) {
-                initialValues = collectValuesFromDump(dumpOut.value);
+                initialValues = collectValuesFromDump(dumpOut.value, dumpOut.__getters__, dumpOut.__editor_props__);
             }
         } catch (e) {
             console.warn(`[pts-asset] Could not fetch dump for "${className}" from scene script, using empty defaults:`, e);
