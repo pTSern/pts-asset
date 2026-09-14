@@ -348,7 +348,7 @@ export function populateDumpWithSaved(dump: any, savedVal: any) {
         // Preserve any custom fields from savedVal that might be defined in a subclass
         if (vData && typeof vData === 'object') {
             for (const extraKey of Object.keys(vData)) {
-                if (_ignores.includes(extraKey) || extraKey.startsWith('__') || isEditorPropItem(dump.value?.[extraKey], extraKey)) continue;
+                if (_ignores.includes(extraKey) || extraKey.startsWith('__')) continue;
                 if (!dump.value[extraKey]) {
                     const extraVal = vData[extraKey];
                     dump.value[extraKey] = {
@@ -538,7 +538,7 @@ export async function resolveAllAssetSubtypes(dumpNode: any): Promise<void> {
  * Preserves concrete subclass __type__ on asset items and nested structs.
  * Strips out Node and Component references entirely (sets to null).
  */
-export function extractDumpValue(dump: any, editorProps?: Record<string, any>): any {
+export function extractDumpValue(dump: any): any {
     if (!dump) return null;
 
     if (dump.isArray) {
@@ -546,7 +546,7 @@ export function extractDumpValue(dump: any, editorProps?: Record<string, any>): 
             return [];
         }
         if (!Array.isArray(dump.value)) return [];
-        return dump.value.map((item: any) => extractDumpValue(item, editorProps));
+        return dump.value.map((item: any) => extractDumpValue(item));
     }
 
     if (isNodeOrComponent(dump)) {
@@ -637,8 +637,7 @@ export function extractDumpValue(dump: any, editorProps?: Record<string, any>): 
         for (const k of Object.keys(dump.value)) {
             if (_ignores.includes(k)) continue;
             const childDump = dump.value[k];
-            if (isEditorPropItem(childDump, k, editorProps)) continue;
-            out[k] = extractDumpValue(childDump, editorProps);
+            out[k] = extractDumpValue(childDump);
         }
         return {
             __type__: dump.actualType || normalizeType(dump.type),
@@ -686,26 +685,17 @@ export function extractDumpValue(dump: any, editorProps?: Record<string, any>): 
     return dump.value !== undefined ? dump.value : dump.default;
 }
 
-export function isEditorPropItem(dumpItem: any, key?: string, editorProps?: Record<string, any>): boolean {
-    if (key && editorProps && editorProps[key]) return true;
-    if (!dumpItem) return false;
-    if (dumpItem.isEditorProp === true) return true;
-    if (dumpItem.group === '_Debugger' || dumpItem.group?.name === '_Debugger') return true;
-    if (dumpItem.serializable === false && (dumpItem.group === '_Debugger' || dumpItem.group?.name === '_Debugger' || dumpItem.visible === false)) return true;
-    return false;
-}
-
-export function collectValuesFromDump(dumpValue: any, gettersInfo?: Record<string, any>, editorProps?: Record<string, any>): Record<string, any> {
+export function collectValuesFromDump(dumpValue: any, gettersInfo?: Record<string, any>): Record<string, any> {
     const result: Record<string, any> = {};
     if (!dumpValue) return result;
     for (const key of Object.keys(dumpValue)) {
         if (_ignores.includes(key) || key.startsWith('__')) continue;
         const item = dumpValue[key];
         if (!item) continue;
-        if (isEditorPropItem(item, key, editorProps)) continue;
+        if (item.isEditorProp || item.group?.name === '_Debugger') continue;
         if (gettersInfo && gettersInfo[key]?.readonly) continue;
         if (item.readonly && item.isGetter) continue;
-        result[key] = extractDumpValue(item, editorProps);
+        result[key] = extractDumpValue(item);
     }
     return result;
 }
@@ -809,11 +799,11 @@ export async function fixSinglePtsAsset(ptsFilePath: string): Promise<FixResult>
     await resolveAllAssetSubtypes(dumpOut.value);
 
     // 5. Extract sanitized and complete values (stripping readonly getters and @editor_property debug props)
-    const cleanValues = collectValuesFromDump(dumpOut.value, dumpOut.__getters__, dumpOut.__editor_props__);
+    const cleanValues = collectValuesFromDump(dumpOut.value, dumpOut.__getters__);
     if (cleanValues) {
         for (const k of Object.keys(cleanValues)) {
             const item = dumpOut.value?.[k];
-            if (isEditorPropItem(item, k, dumpOut.__editor_props__) || dumpOut.__getters__?.[k]?.readonly) {
+            if (item?.isEditorProp || item?.group?.name === '_Debugger' || dumpOut.__getters__?.[k]?.readonly) {
                 delete cleanValues[k];
             }
         }
