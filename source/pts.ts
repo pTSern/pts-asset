@@ -1712,50 +1712,28 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                     return;
                 }
                 const getterInfo = _lastDump?.__getters__?.[propName];
-                if (getterInfo || dump.isGetter || _lastDump?.value?.['_' + propName] !== undefined) {
+                if (getterInfo && getterInfo.readonly) {
                     return;
                 }
                 _cachedData.__value__[propName] = extractDumpValue(dump, _lastDump?.__editor_props__);
             }
         });
 
-        // Preserve backing fields (e.g. _bundle) for array items and nested objects
+        // Preserve backing fields (e.g. _bundle) for array items
         if (_cachedData.__value__) {
             for (const propName of Object.keys(_cachedData.__value__)) {
-                const val = _cachedData.__value__[propName];
-                const dumpItem = _lastDump?.value?.[propName];
-                if (Array.isArray(val) && dumpItem && Array.isArray(dumpItem.value)) {
-                    for (let i = 0; i < val.length; i++) {
-                        const itemVal = val[i]?.__value__ || val[i];
-                        const childDump = dumpItem.value[i];
-                        const dumpItemVal = childDump?.value;
+                const arr = _cachedData.__value__[propName];
+                const dumpArr = _lastDump?.value?.[propName];
+                if (Array.isArray(arr) && dumpArr && Array.isArray(dumpArr.value)) {
+                    for (let i = 0; i < arr.length; i++) {
+                        const itemVal = arr[i]?.__value__ || arr[i];
+                        const dumpItem = dumpArr.value[i];
+                        const dumpItemVal = dumpItem?.value;
                         if (itemVal && typeof itemVal === 'object' && dumpItemVal && typeof dumpItemVal === 'object') {
                             for (const k in dumpItemVal) {
                                 if (k.startsWith('_') && (itemVal[k] === undefined || itemVal[k] === '')) {
                                     if (dumpItemVal[k].value !== undefined && dumpItemVal[k].value !== '') {
                                         itemVal[k] = dumpItemVal[k].value;
-                                    } else {
-                                        const publicProp = k.slice(1);
-                                        if (itemVal[publicProp] !== undefined && itemVal[publicProp] !== '') {
-                                            itemVal[k] = itemVal[publicProp];
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else if (val && typeof val === 'object' && dumpItem && dumpItem.value && typeof dumpItem.value === 'object') {
-                    const itemVal = val.__value__ || val;
-                    const dumpItemVal = dumpItem.value;
-                    if (itemVal && typeof itemVal === 'object' && dumpItemVal && typeof dumpItemVal === 'object') {
-                        for (const k in dumpItemVal) {
-                            if (k.startsWith('_') && (itemVal[k] === undefined || itemVal[k] === '')) {
-                                if (dumpItemVal[k].value !== undefined && dumpItemVal[k].value !== '') {
-                                    itemVal[k] = dumpItemVal[k].value;
-                                } else {
-                                    const publicProp = k.slice(1);
-                                    if (itemVal[publicProp] !== undefined && itemVal[publicProp] !== '') {
-                                        itemVal[k] = itemVal[publicProp];
                                     }
                                 }
                             }
@@ -1772,7 +1750,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 const item = _lastDump.value[key];
                 if (isEditorPropItem(item, key, _lastDump.__editor_props__)) continue;
                 const getterInfo = _lastDump?.__getters__?.[key];
-                if (getterInfo || item.isGetter || _lastDump?.value?.['_' + key] !== undefined) continue;
+                if (getterInfo && getterInfo.readonly) continue;
                 if (!(_cachedData.__value__.hasOwnProperty(key))) {
                     _cachedData.__value__[key] = extractDumpValue(item, _lastDump.__editor_props__);
                 }
@@ -1796,18 +1774,20 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             }
         }
 
-        // Strip any getters that may have been previously saved in __value__
+        // Strip any readonly getters that may have been previously saved in __value__
         if (_lastDump && _lastDump.__getters__) {
             for (const g in _lastDump.__getters__) {
-                delete _cachedData.__value__[g];
+                if (_lastDump.__getters__[g].readonly) {
+                    delete _cachedData.__value__[g];
+                }
             }
         }
 
-        // Strip any internal engine, lifecycle, ignored, getter, or editor_property debug fields from __value__
+        // Strip any internal engine, lifecycle, ignored, or editor_property debug fields from __value__
         if (_cachedData && _cachedData.__value__) {
             for (const k of Object.keys(_cachedData.__value__)) {
                 const item = _lastDump?.value?.[k];
-                if (_ignores.includes(k) || k.startsWith('__') || isEditorPropItem(item, k, _lastDump?.__editor_props__) || _lastDump?.__getters__?.[k] || item?.isGetter || _lastDump?.value?.['_' + k] !== undefined) {
+                if (_ignores.includes(k) || k.startsWith('__') || isEditorPropItem(item, k, _lastDump?.__editor_props__)) {
                     delete _cachedData.__value__[k];
                 }
             }
@@ -2149,23 +2129,13 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             const lastProp = parts[parts.length - 1];
             if (isNaN(Number(lastProp))) {
                 const backingKey = '_' + lastProp;
-                let curCached = _cachedData.__value__;
-                let curDump = _lastDump?.value;
-                for (let i = 0; i < parts.length - 1; i++) {
-                    const p = parts[i];
-                    if (curCached) curCached = curCached[p]?.__value__ || curCached[p];
-                    if (curDump) curDump = curDump[p]?.value || curDump[p];
-                }
-                if (curCached && (backingKey in curCached || (curDump && curDump[backingKey]))) {
-                    curCached[backingKey] = newValue;
-                }
-                if (curDump && curDump[backingKey]) {
-                    curDump[backingKey].value = newValue;
-                }
                 if (parts.length === 1) {
-                    const backingEl = panel.$.view.querySelector(`.pts-basic-prop[data-key="${backingKey}"]`) as any;
-                    if (backingEl && backingEl.render && _lastDump?.value?.[backingKey]) {
-                        backingEl.render(_lastDump.value[backingKey]);
+                    if (_lastDump && _lastDump.value && _lastDump.value[backingKey]) {
+                        _lastDump.value[backingKey].value = _cachedData.__value__[backingKey];
+                        const backingEl = panel.$.view.querySelector(`.pts-basic-prop[data-key="${backingKey}"]`) as any;
+                        if (backingEl && backingEl.render) {
+                            backingEl.render(_lastDump.value[backingKey]);
+                        }
                     }
                 }
             }

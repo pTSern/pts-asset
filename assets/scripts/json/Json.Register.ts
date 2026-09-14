@@ -1,7 +1,9 @@
-import { Asset, assetManager, Component, Node, js, director, Director, RealCurve, Gradient, ColorKey, AlphaKey, Color } from "cc";
+import { Asset, assetManager, Component, Node, js, director, Director, assert, RealCurve, Gradient, ColorKey, AlphaKey, Color, AssetManager, CCClass } from "cc";
 import { BUILD } from "cc/env";
 import { pTSAsset } from "db://pts-core/scripts/pTSAsset";
 import * as pEngine from "db://pts-core/scripts/utils/pEngine";
+import * as pGlobal from "db://pts-core/scripts/utils/pGlobal";
+import * as pObject from "db://pts-core/scripts/utils/pObject";
 import * as pConst from "db://pts-core/scripts/utils/pConst";
 import { loadLazyBundle, isLazyReady, lazyAssetsCache, bundleMapCache, shouldLoadLazy } from "../_$secret/_lazy-migration";
 
@@ -716,18 +718,11 @@ function _resolveValue(val: any, expectedCtor?: any, target?: any, propKey?: str
         // Apply defaults for missing properties
         if (subProps) {
             for (const k in subProps) {
-                if (k in vMap) continue;
-                if (('_' + k) in vMap) continue;
-                if (k.startsWith('_') && k.slice(1) in vMap) continue;
-
-                const def = subProps[k]?.default;
-                const defVal = typeof def === 'function' ? def() : def;
-                if (defVal === undefined) continue;
-
-                const desc = _getPropDescriptor(instance, k);
-                if (desc && typeof desc.get === 'function' && !desc.set) continue;
-
-                _assignPropSafely(instance, k, defVal);
+                if (!(k in vMap)) {
+                    const def = subProps[k]?.default;
+                    const defVal = typeof def === 'function' ? def() : def;
+                    _assignPropSafely(instance, k, defVal);
+                }
             }
         }
         return instance;
@@ -754,18 +749,11 @@ function _resolveValue(val: any, expectedCtor?: any, target?: any, propKey?: str
             }
             if (subProps) {
                 for (const k in subProps) {
-                    if (k in val) continue;
-                    if (('_' + k) in val) continue;
-                    if (k.startsWith('_') && k.slice(1) in val) continue;
-
-                    const def = subProps[k]?.default;
-                    const defVal = typeof def === 'function' ? def() : def;
-                    if (defVal === undefined) continue;
-
-                    const desc = _getPropDescriptor(instance, k);
-                    if (desc && typeof desc.get === 'function' && !desc.set) continue;
-
-                    _assignPropSafely(instance, k, defVal);
+                    if (!(k in val)) {
+                        const def = subProps[k]?.default;
+                        const defVal = typeof def === 'function' ? def() : def;
+                        _assignPropSafely(instance, k, defVal);
+                    }
                 }
             }
             return instance;
@@ -874,9 +862,6 @@ function _hydrate(asset: Asset, ptsJson: any): void {
                     }
 
                     if (!(_key in __value__)) {
-                        if (('_' + _key) in __value__) continue;
-                        if (_key.startsWith('_') && _key.slice(1) in __value__) continue;
-
                         const _default = propDef?.default;
                         let defaultVal: any = undefined;
                         try {
