@@ -342,20 +342,7 @@ export function populateDumpWithSaved(dump: any, savedVal: any) {
         for (const childKey of Object.keys(dump.value)) {
             if (_ignores.includes(childKey)) continue;
             const childDump = dump.value[childKey];
-            let childSaved = (vData && typeof vData === 'object') ? vData[childKey] : undefined;
-            if ((childSaved === undefined || childSaved === '') && vData && typeof vData === 'object') {
-                if (childKey.startsWith('_')) {
-                    const publicProp = childKey.slice(1);
-                    if (vData[publicProp] !== undefined && vData[publicProp] !== '') {
-                        childSaved = vData[publicProp];
-                    }
-                } else {
-                    const backingProp = '_' + childKey;
-                    if (vData[backingProp] !== undefined && vData[backingProp] !== '') {
-                        childSaved = vData[backingProp];
-                    }
-                }
-            }
+            const childSaved = (vData && typeof vData === 'object') ? vData[childKey] : undefined;
             populateDumpWithSaved(childDump, childSaved);
         }
         // Preserve any custom fields from savedVal that might be defined in a subclass
@@ -650,23 +637,8 @@ export function extractDumpValue(dump: any, editorProps?: Record<string, any>): 
         for (const k of Object.keys(dump.value)) {
             if (_ignores.includes(k)) continue;
             const childDump = dump.value[k];
-            // Do NOT apply outer class editorProps to nested struct children
-            if (isEditorPropItem(childDump, k)) continue;
-            // Get-set-ter properties should not be written to disk!
-            if (childDump && childDump.isGetter) continue;
-            if (dump.value['_' + k] !== undefined) continue;
-            out[k] = extractDumpValue(childDump);
-        }
-        // Ensure backing fields starting with '_' are synced from public getter/setter property if empty
-        for (const k of Object.keys(dump.value)) {
-            if (k.startsWith('_') && (out[k] === undefined || out[k] === '')) {
-                const publicProp = k.slice(1);
-                const pubDump = dump.value[publicProp];
-                const pubVal = pubDump?.value !== undefined ? pubDump.value : (pubDump?.default !== undefined ? pubDump.default : out[publicProp]);
-                if (pubVal !== undefined && pubVal !== '') {
-                    out[k] = pubVal;
-                }
-            }
+            if (isEditorPropItem(childDump, k, editorProps)) continue;
+            out[k] = extractDumpValue(childDump, editorProps);
         }
         return {
             __type__: dump.actualType || normalizeType(dump.type),
@@ -731,10 +703,8 @@ export function collectValuesFromDump(dumpValue: any, gettersInfo?: Record<strin
         const item = dumpValue[key];
         if (!item) continue;
         if (isEditorPropItem(item, key, editorProps)) continue;
-        // Skip ALL getters and accessors! Get-set-ter properties should not be written to disk.
-        if (gettersInfo && gettersInfo[key]) continue;
-        if (item.isGetter) continue;
-        if (dumpValue['_' + key] !== undefined) continue;
+        if (gettersInfo && gettersInfo[key]?.readonly) continue;
+        if (item.readonly && item.isGetter) continue;
         result[key] = extractDumpValue(item, editorProps);
     }
     return result;
@@ -843,7 +813,7 @@ export async function fixSinglePtsAsset(ptsFilePath: string): Promise<FixResult>
     if (cleanValues) {
         for (const k of Object.keys(cleanValues)) {
             const item = dumpOut.value?.[k];
-            if (isEditorPropItem(item, k, dumpOut.__editor_props__) || dumpOut.__getters__?.[k] || item?.isGetter || dumpOut.value?.['_' + k] !== undefined) {
+            if (isEditorPropItem(item, k, dumpOut.__editor_props__) || dumpOut.__getters__?.[k]?.readonly) {
                 delete cleanValues[k];
             }
         }
