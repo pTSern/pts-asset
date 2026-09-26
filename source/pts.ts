@@ -46,6 +46,7 @@ import {
 } from './pts-fixer';
 
 export { extractAssetDependencies, extractDumpValue, collectValuesFromDump, populateDumpWithSaved, isEnumType, isEditorPropItem };
+import { getScriptUuidForClass } from './inheritance';
 import { AssetInfo } from '@cocos/creator-types/editor/packages/asset-db/@types/public'
 import fs from 'fs'
 interface Asset {
@@ -802,6 +803,10 @@ function resolveDumpForUiAsset(uiAsset: HTMLElement, rootDump: any = _lastDump):
 
 function syncUiAssetToDump(uiAsset: HTMLElement, rootDump: any = _lastDump): boolean {
     if (!uiAsset || uiAsset.tagName !== 'UI-ASSET') return false;
+    const basicProp = uiAsset.closest('.pts-basic-prop') as HTMLElement;
+    if (basicProp && basicProp.dataset.key === 'script') {
+        return false;
+    }
     const targetDump = resolveDumpForUiAsset(uiAsset, rootDump);
     if (!targetDump) {
         console.warn('[pTS Inspector] Could not resolve dump node for ui-asset:', uiAsset);
@@ -833,6 +838,10 @@ function bindUiAssetEvents(root: Element | DocumentFragment | null, onTrigger: (
     if (!root) return;
     const assets = collectAllUiAssets(root);
     assets.forEach((assetEl: any) => {
+        const basicProp = assetEl.closest('.pts-basic-prop') as HTMLElement;
+        if (basicProp && basicProp.dataset.key === 'script') {
+            return;
+        }
         if (assetEl.__pts_bound__) return;
         assetEl.__pts_bound__ = true;
 
@@ -963,6 +972,23 @@ let _currentTriggerAutoSave: (() => void) | null = null;
 
 async function renderView(this: PanelThis, dumpValue: any) {
     if (!dumpValue) return;
+
+    // Inject 'script' property (source script of this asset, readonly mode like Component does)
+    const currentClassName = (_cachedData && _cachedData.__type__) 
+        || (this.$.ptsa && this.$.ptsa.value) 
+        || (this.metaList && this.metaList[0]?.userData?.__type__);
+    const scriptUuid = currentClassName ? (getScriptUuidForClass(currentClassName) || '') : '';
+
+    dumpValue['script'] = {
+        name: 'script',
+        displayName: 'Script',
+        type: 'cc.Script',
+        extends: ['cc.Asset'],
+        value: { uuid: scriptUuid },
+        readonly: true,
+        visible: true,
+        displayOrder: -999999
+    };
 
     const _keys = Object.keys(dumpValue).filter(k => !_ignores.includes(k));
 
@@ -1096,6 +1122,24 @@ async function renderView(this: PanelThis, dumpValue: any) {
         if (el) {
             el.dump = _item;
             el.render(_item);
+            if (_key === 'script') {
+                el.setAttribute('readonly', 'true');
+                const uiAsset = el.querySelector('ui-asset');
+                if (uiAsset) {
+                    uiAsset.setAttribute('readonly', 'true');
+                    if (scriptUuid) {
+                        uiAsset.setAttribute('value', scriptUuid);
+                        uiAsset.value = scriptUuid;
+                    }
+                } else {
+                    el.innerHTML = `
+                        <ui-label slot="label" tooltip="Source script of this pTS Asset">Script</ui-label>
+                        <ui-asset slot="content" readonly droppable="cc.Script" value="${scriptUuid || ''}"></ui-asset>
+                    `;
+                }
+            } else if (_item && _item.readonly) {
+                el.setAttribute('readonly', 'true');
+            }
             el.style.display = _item && _item.visible === false ? 'none' : '';
         }
     });
@@ -1114,6 +1158,10 @@ async function renderView(this: PanelThis, dumpValue: any) {
             const target = (e.composedPath ? e.composedPath()[0] : e.target) as HTMLElement;
             const assetEl = target?.closest('ui-asset') as HTMLElement;
             if (assetEl) {
+                const basicProp = assetEl.closest('.pts-basic-prop') as HTMLElement;
+                if (basicProp && basicProp.dataset.key === 'script') {
+                    return;
+                }
                 console.log(`[pTS Inspector] Delegated ui-asset event (${e.type}), new value:`, (assetEl as any).value);
                 syncUiAssetToDump(assetEl, _lastDump);
                 if (_currentTriggerAutoSave) _currentTriggerAutoSave();
@@ -1705,10 +1753,11 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         // Collect values from basic props
         this.$.view.querySelectorAll('.pts-basic-prop').forEach((el: any) => {
             const key = el.dataset.key;
+            if (key === 'script') return;
             const dump = el.dump || (_lastDump?.value && _lastDump.value[key]);
             if (dump) {
                 const propName = dump.name || key;
-                if (isEditorPropItem(dump, propName, _lastDump?.__editor_props__)) {
+                if (propName === 'script' || propName === '__scriptAsset' || isEditorPropItem(dump, propName, _lastDump?.__editor_props__)) {
                     return;
                 }
                 const getterInfo = _lastDump?.__getters__?.[propName];
@@ -2337,6 +2386,18 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
 
     if (this.$.ptsa) {
         this.$.ptsa.onchange = () => {
+            const newType = this.$.ptsa.value;
+            if (newType) {
+                const newUuid = getScriptUuidForClass(newType) || '';
+                const scriptProp = this.$.view ? this.$.view.querySelector('.pts-basic-prop[data-key="script"]') : null;
+                if (scriptProp) {
+                    const uiAsset = scriptProp.querySelector('ui-asset');
+                    if (uiAsset) {
+                        uiAsset.setAttribute('value', newUuid);
+                        (uiAsset as any).value = newUuid;
+                    }
+                }
+            }
             triggerAutoSave();
         };
     }

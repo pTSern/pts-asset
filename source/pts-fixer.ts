@@ -727,9 +727,9 @@ export function collectValuesFromDump(dumpValue: any, gettersInfo?: Record<strin
     const result: Record<string, any> = {};
     if (!dumpValue) return result;
     for (const key of Object.keys(dumpValue)) {
-        if (_ignores.includes(key) || key.startsWith('__')) continue;
+        if (key === 'script' || _ignores.includes(key) || key.startsWith('__')) continue;
         const item = dumpValue[key];
-        if (!item) continue;
+        if (!item || item.name === 'script') continue;
         if (isEditorPropItem(item, key, editorProps)) continue;
         // Skip ALL getters and accessors! Get-set-ter properties should not be written to disk.
         if (gettersInfo && gettersInfo[key]) continue;
