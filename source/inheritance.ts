@@ -9,6 +9,8 @@ const _implementsMap = new Map<string, Set<string>>();
 const _tsToCcMap = new Map<string, string>();
 const _ccToTsMap = new Map<string, string>();
 const _runtimeChains = new Map<string, string[]>();
+const _classToScriptUuidMap = new Map<string, string>();
+const _classToScriptPathMap = new Map<string, string>();
 let _hasScanned = false;
 
 function getMountedAssetDirs(pkgJson: any, extDir: string): string[] {
@@ -45,6 +47,29 @@ function parseTsFile(filePath: string): void {
         const content = fs.readFileSync(filePath, 'utf8');
         if (!content.includes('class')) return;
 
+        let scriptUuid = '';
+        try {
+            const metaPath = filePath + '.meta';
+            if (fs.existsSync(metaPath)) {
+                const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+                if (meta && meta.uuid) {
+                    scriptUuid = meta.uuid;
+                }
+            }
+        } catch {}
+
+        // 1. Direct map for any @ccclass('ClassName')
+        const ccDecorators = [...content.matchAll(/@ccclass\s*\(\s*['"]([^'"]+)['"]\s*\)/g)];
+        for (const ccDec of ccDecorators) {
+            const ccName = ccDec[1];
+            if (ccName) {
+                if (scriptUuid) {
+                    _classToScriptUuidMap.set(ccName, scriptUuid);
+                }
+                _classToScriptPathMap.set(ccName, filePath);
+            }
+        }
+
         const classRegex = /((?:export\s+|default\s+|abstract\s+)*)class\s+([A-Za-z0-9_]+)(?:<[\s\S]*?>)?(?:\s+extends\s+([A-Za-z0-9_.]+)(?:<[\s\S]*?>)?)?(?:\s+implements\s+([^{]+))?/g;
 
         for (const match of content.matchAll(classRegex)) {
@@ -65,6 +90,13 @@ function parseTsFile(filePath: string): void {
 
             _tsToCcMap.set(tsClassName, finalClassName);
             _ccToTsMap.set(finalClassName, tsClassName);
+
+            if (scriptUuid) {
+                _classToScriptUuidMap.set(tsClassName, scriptUuid);
+                _classToScriptUuidMap.set(finalClassName, scriptUuid);
+            }
+            _classToScriptPathMap.set(tsClassName, filePath);
+            _classToScriptPathMap.set(finalClassName, filePath);
 
             if (parentClass) {
                 _parentMap.set(tsClassName, parentClass);
@@ -119,6 +151,8 @@ export function scanInheritance(force: boolean = false): void {
     _implementsMap.clear();
     _tsToCcMap.clear();
     _ccToTsMap.clear();
+    _classToScriptUuidMap.clear();
+    _classToScriptPathMap.clear();
 
     const searchDirs = new Set<string>();
 
@@ -378,4 +412,28 @@ export function isSubclassOrSame(targetClass: string, ancestorClass: string): bo
     if (targetClass === ancestorClass) return true;
     const chain = getExtendsChain(targetClass);
     return chain.includes(ancestorClass);
+}
+
+export function getScriptUuidForClass(className: string): string | undefined {
+    if (!_hasScanned) {
+        scanInheritance();
+    }
+    let uuid = _classToScriptUuidMap.get(className);
+    if (!uuid) {
+        scanInheritance(true);
+        uuid = _classToScriptUuidMap.get(className);
+    }
+    return uuid;
+}
+
+export function getScriptPathForClass(className: string): string | undefined {
+    if (!_hasScanned) {
+        scanInheritance();
+    }
+    let p = _classToScriptPathMap.get(className);
+    if (!p) {
+        scanInheritance(true);
+        p = _classToScriptPathMap.get(className);
+    }
+    return p;
 }
