@@ -3,7 +3,6 @@
     "compilerOptions": {
         "outDir": "./dist",
         "rootDir": "./source",
-        "ignoreDeprecations": "6.0",
         "types": ["node", "@cocos/creator-types/editor"]
     },
     "exclude": [
