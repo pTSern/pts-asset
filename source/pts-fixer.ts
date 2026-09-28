@@ -882,6 +882,16 @@ export async function fixSinglePtsAsset(ptsFilePath: string): Promise<FixResult>
         const depends = extractAssetDependencies(newPtsData);
         let metaNeedsSave = false;
         if (meta) {
+            if (Array.isArray(meta.files)) {
+                if (!meta.files.includes('.json')) {
+                    meta.files.unshift('.json');
+                    metaNeedsSave = true;
+                }
+                if (!meta.files.includes('.pts')) {
+                    meta.files.push('.pts');
+                    metaNeedsSave = true;
+                }
+            }
             meta.userData = meta.userData || {};
             if (meta.userData.__type__ !== targetType) {
                 meta.userData.__type__ = targetType;

@@ -304,11 +304,21 @@ export function rescanAndSyncLazyPrefab(): LazySyncReport {
                     depends = meta.userData.depends;
                 }
 
-                // Ensure meta.files includes both '.json' and '.pts' so Cocos build pipeline emits import json
-                if (Array.isArray(meta.files) && !meta.files.includes('.json')) {
-                    meta.files.unshift('.json');
-                    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf8');
-                    console.log(`[pts-asset:lazy-registry] Auto-healed missing '.json' in meta.files for ${ptsFile}`);
+                // Ensure meta.files includes both '.json' and '.pts' so Cocos build pipeline emits both import json and native .pts
+                if (Array.isArray(meta.files)) {
+                    let changedFiles = false;
+                    if (!meta.files.includes('.json')) {
+                        meta.files.unshift('.json');
+                        changedFiles = true;
+                    }
+                    if (!meta.files.includes('.pts')) {
+                        meta.files.push('.pts');
+                        changedFiles = true;
+                    }
+                    if (changedFiles) {
+                        fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf8');
+                        console.log(`[pts-asset:lazy-registry] Auto-healed missing files in meta.files for ${ptsFile}`);
+                    }
                 }
             } catch {}
         }
@@ -608,6 +618,14 @@ export function rescanAndSyncLazyPrefab(): LazySyncReport {
             bundleMap[candUuid] = bName;
             bundleMap[baseUuid] = bName;
         }
+    }
+
+    // Assets placed in _lazy.prefab are packed into _$secret (due to _$secret priority > project bundles).
+    // Override their bundle map so runtime resolvers query _$secret directly.
+    for (const item of addedToLazy) {
+        bundleMap[item.uuid] = '_$secret';
+        const baseUuid = item.uuid.split('@')[0];
+        bundleMap[baseUuid] = '_$secret';
     }
 
     const bundleMapPath = path.join(secretDir, 'pts-bundle-map.json');
