@@ -794,6 +794,7 @@ let _installedIpcHooks = new Map<string, Function>();
 function _installIpcHook() {
     try {
         const { ipcMain } = require('electron');
+        console.log("[pts-asset] IPCMain: ", ipcMain);
         if (!ipcMain || !ipcMain._invokeHandlers) return;
 
         for (const [channel, originalHandler] of ipcMain._invokeHandlers.entries()) {
