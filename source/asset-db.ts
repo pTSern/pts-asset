@@ -232,6 +232,38 @@ function _enrichAssetConfigMap(map: Record<string, any>) {
 
 let _installed = false;
 
+interface InstalledHook {
+    target: any;
+    key: string;
+    original: Function;
+    wrapped: Function;
+}
+
+const _installedHooks: InstalledHook[] = [];
+
+function _installHook(target: any, key: string, createWrapper: (original: Function) => Function): boolean {
+    if (!target || typeof target[key] !== 'function') return false;
+
+    const original = target[key] as Function;
+    if ((original as any).__pts_asset_db_hooked__) return false;
+
+    const wrapped = createWrapper(original);
+    (wrapped as any).__pts_asset_db_hooked__ = true;
+    target[key] = wrapped;
+    _installedHooks.push({ target, key, original, wrapped });
+    return true;
+}
+
+function _restoreHooks() {
+    for (let i = _installedHooks.length - 1; i >= 0; i--) {
+        const hook = _installedHooks[i];
+        if (hook.target && hook.target[hook.key] === hook.wrapped) {
+            hook.target[hook.key] = hook.original;
+        }
+    }
+    _installedHooks.length = 0;
+}
+
 export function load() {
     console.log("[pts-asset:asset-db] Manager: ", Manager)
     if (_installed) return;
@@ -241,86 +273,30 @@ export function load() {
         if (typeof Manager !== 'undefined' && Manager && Manager.assetManager) {
             const am = Manager.assetManager;
 
-            if (typeof am.encodeAsset === 'function') {
-                const origEncode = am.encodeAsset;
-                am.encodeAsset = function(asset: any) {
+            if (_installHook(am, 'encodeAsset', (origEncode) => function(asset: any) {
                     const info = origEncode.call(am, asset);
                     _enrichInfo(info);
                     return info;
-                };
+                })) {
                 console.log('[pts-asset:asset-db] Hooked Manager.assetManager.encodeAsset');
             }
 
-            if (typeof am.queryAssetInfo === 'function') {
-                const origQueryInfo = am.queryAssetInfo;
-                am.queryAssetInfo = function(uuid: string, dataKeys?: any) {
+            if (_installHook(am, 'queryAssetInfo', (origQueryInfo) => function(uuid: string, dataKeys?: any) {
                     const info = origQueryInfo.call(am, uuid, dataKeys);
                     _enrichInfo(info);
                     return info;
-                };
+                })) {
                 console.log('[pts-asset:asset-db] Hooked Manager.assetManager.queryAssetInfo');
             }
 
-            if (typeof am.queryAssets === 'function') {
-                const origQueryAssets = am.queryAssets;
-                am.queryAssets = function(options?: any, dataKeys?: any) {
-                    let results = origQueryAssets.call(am, options, dataKeys);
-                    if (!Array.isArray(results)) results = [];
-
-                    const requestedTypes: string[] = [];
-                    if (options) {
-                        if (options.ccType) {
-                            if (Array.isArray(options.ccType)) requestedTypes.push(...options.ccType);
-                            else if (typeof options.ccType === 'string') requestedTypes.push(options.ccType);
-                        }
-                        if (options.type) {
-                            if (Array.isArray(options.type)) requestedTypes.push(...options.type);
-                            else if (typeof options.type === 'string') requestedTypes.push(options.type);
-                        }
-                    }
-
-                    if (requestedTypes.length > 0) {
-                        const ptsQueryOpts: any = { extname: ['.pts'] };
-                        if (options.pattern) ptsQueryOpts.pattern = options.pattern;
-                        const allPts = origQueryAssets.call(am, ptsQueryOpts, dataKeys) || [];
-                        const existingUuids = new Set(results.map((r: any) => r && r.uuid));
-
-                        for (const ptsAsset of allPts) {
-                            if (!ptsAsset || existingUuids.has(ptsAsset.uuid)) continue;
-                            _enrichInfo(ptsAsset);
-                            const matches = requestedTypes.some(req => {
-                                if (!req) return false;
-                                if (ptsAsset.type === req) return true;
-                                if (Array.isArray(ptsAsset.extends) && ptsAsset.extends.includes(req)) return true;
-                                return false;
-                            });
-                            if (matches) {
-                                existingUuids.add(ptsAsset.uuid);
-                                results.push(ptsAsset);
-                            }
-                        }
-                    } else {
-                        for (const item of results) {
-                            _enrichInfo(item);
-                        }
-                    }
-
-                    return results;
-                };
-                console.log('[pts-asset:asset-db] Hooked Manager.assetManager.queryAssets');
-            }
             if (typeof Manager !== 'undefined' && Manager) {
                 if (Manager.assetHandlerManager) {
                     const ahm = Manager.assetHandlerManager;
-                    if (typeof ahm.queryIconConfigMap === 'function' && !ahm.queryIconConfigMap.__pts_hooked__) {
-                        const origIconMap = ahm.queryIconConfigMap;
-                        const wrappedIconMap = function(...args: any[]) {
+                    if (_installHook(ahm, 'queryIconConfigMap', (origIconMap) => function(...args: any[]) {
                             const map = origIconMap.call(ahm, ...args) || {};
                             _enrichIconConfigMap(map);
                             return map;
-                        };
-                        wrappedIconMap.__pts_hooked__ = true;
-                        ahm.queryIconConfigMap = wrappedIconMap;
+                        })) {
                         console.log('[pts-asset:asset-db] Hooked Manager.assetHandlerManager.queryIconConfigMap');
                     }
                     if (ahm.iconConfigMap && typeof ahm.iconConfigMap === 'object') {
@@ -328,15 +304,11 @@ export function load() {
                         console.log('[pts-asset:asset-db] Enriched Manager.assetHandlerManager.iconConfigMap');
                     }
 
-                    if (typeof ahm.queryAssetConfigMap === 'function' && !ahm.queryAssetConfigMap.__pts_hooked__) {
-                        const origAssetConfigMap = ahm.queryAssetConfigMap;
-                        const wrappedAssetConfigMap = function(...args: any[]) {
+                    if (_installHook(ahm, 'queryAssetConfigMap', (origAssetConfigMap) => function(...args: any[]) {
                             const map = origAssetConfigMap.call(ahm, ...args) || {};
                             _enrichAssetConfigMap(map);
                             return map;
-                        };
-                        wrappedAssetConfigMap.__pts_hooked__ = true;
-                        ahm.queryAssetConfigMap = wrappedAssetConfigMap;
+                        })) {
                         console.log('[pts-asset:asset-db] Hooked Manager.assetHandlerManager.queryAssetConfigMap');
                     }
                     if (ahm.assetConfigMap && typeof ahm.assetConfigMap === 'object') {
@@ -344,9 +316,7 @@ export function load() {
                         console.log('[pts-asset:asset-db] Enriched Manager.assetHandlerManager.assetConfigMap');
                     }
 
-                    if (typeof ahm.queryAssetThumbnail === 'function' && !ahm.queryAssetThumbnail.__pts_hooked__) {
-                        const origThumb = ahm.queryAssetThumbnail;
-                        const wrappedThumb = function(uuid: string, ...args: any[]) {
+                    if (_installHook(ahm, 'queryAssetThumbnail', (origThumb) => function(uuid: string, ...args: any[]) {
                             if (_isPtsUuid(uuid)) {
                                 return {
                                     type: 'image',
@@ -354,16 +324,12 @@ export function load() {
                                 };
                             }
                             return origThumb.call(ahm, uuid, ...args);
-                        };
-                        wrappedThumb.__pts_hooked__ = true;
-                        ahm.queryAssetThumbnail = wrappedThumb;
+                        })) {
                         console.log('[pts-asset:asset-db] Hooked Manager.assetHandlerManager.queryAssetThumbnail');
                     }
                 }
 
-                if (typeof (Manager as any).queryAssetThumbnail === 'function' && !(Manager as any).queryAssetThumbnail.__pts_hooked__) {
-                    const origManagerThumb = (Manager as any).queryAssetThumbnail;
-                    const wrappedManagerThumb = function(uuid: string, ...args: any[]) {
+                if (_installHook(Manager as any, 'queryAssetThumbnail', (origManagerThumb) => function(uuid: string, ...args: any[]) {
                         if (_isPtsUuid(uuid)) {
                             return {
                                 type: 'image',
@@ -371,9 +337,7 @@ export function load() {
                             };
                         }
                         return origManagerThumb.call(Manager, uuid, ...args);
-                    };
-                    wrappedManagerThumb.__pts_hooked__ = true;
-                    (Manager as any).queryAssetThumbnail = wrappedManagerThumb;
+                    })) {
                     console.log('[pts-asset:asset-db] Hooked Manager.queryAssetThumbnail');
                 }
             }
@@ -386,6 +350,7 @@ export function load() {
 
 export function unload() {
     console.log('[pts-asset:asset-db] Unloaded asset-db worker hooks');
+    _restoreHooks();
     _ptsTypeCache.clear();
     clearInheritanceCache();
     _installed = false;

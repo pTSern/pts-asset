@@ -8,6 +8,7 @@
     "scripts": {
         "preinstall": "node ./scripts/preinstall.js",
         "build": "tsc",
+        "test:query-isolation": "node ./scripts/test-query-isolation.js",
         "watch": "tsc -w"
     },
     "description": "i18n:pts-asset.description",

@@ -128,11 +128,8 @@ export const methods: { [key: string]: (...any: any) => any } = {
         }
     },
     async reload() {
-        console.log('[pts-asset] Reloading extension cache and hooks...');
+        console.log('[pts-asset] Reloading extension cache...');
         _ptsTypeCache.clear();
-        _installIpcHook();
-        _hookAssetDbRequireCache();
-        _installMessageHook();
     },
     async onSelectionSelect(type: string, uuid: string) {
         console.log("onSelectionSelect >>", type, uuid);
@@ -1007,9 +1004,10 @@ function _uninstallMessageHook() {
  */
 export async function load() {
     checkPtsCoreDependency(false);
-    _installIpcHook();
-    _hookAssetDbRequireCache();
-    _installMessageHook();
+
+    // Do not globally intercept Asset DB queries. Cocos callers depend on filters
+    // such as directory/bundle scope being preserved exactly; augmenting those
+    // results with unrelated .pts records breaks the Builder bundle workflow.
 
     try {
         const projectPath = (typeof Editor !== 'undefined' && Editor.Project && Editor.Project.path) ? Editor.Project.path : process.cwd();
@@ -1036,6 +1034,8 @@ export async function load() {
  * @zh 卸载扩展时触发的方法
  */
 export function unload() {
+    // These are retained for compatibility with a previously loaded extension
+    // instance; they are no-ops when no legacy global hooks were installed.
     _uninstallIpcHook();
     _uninstallMessageHook();
     _ptsTypeCache.clear();
