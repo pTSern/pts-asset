@@ -584,6 +584,7 @@ function _isPtsUuid(uuid: string): boolean {
 }
 
 function _enrichPtsAssetInfo(info: any) {
+    console.log('[pts-asset] Enriching asset info:', info);
     if (!info) return;
     const file = info.file || info.path;
     if (!file || typeof file !== 'string' || !file.endsWith('.pts')) return;
