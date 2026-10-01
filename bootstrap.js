@@ -44,8 +44,11 @@ function reloadMain() {
         }
     } catch (e) {}
     try {
-        const resolved = require.resolve(mainJsPath);
-        delete require.cache[resolved];
+        for (const key of Object.keys(require.cache)) {
+            if (key.includes('pts-asset')) {
+                delete require.cache[key];
+            }
+        }
         loadMain();
         if (mainModule && typeof mainModule.load === 'function') {
             mainModule.load();

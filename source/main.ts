@@ -647,7 +647,10 @@ function _getAllPtsClasses(): Set<string> {
                     if (fs.existsSync(metaFile)) {
                         try {
                             const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
-                            if (meta && meta.uuid) _ptsUuids.add(meta.uuid);
+                            if (meta && meta.uuid) {
+                                _ptsUuids.add(meta.uuid);
+                                if (t) _ptsTypeCache.set(meta.uuid, t);
+                            }
                         } catch {}
                     }
                 }
@@ -669,6 +672,7 @@ function _enrichIconConfigMap(map: Record<string, any>) {
     };
 
     map['pts'] = ptsIconConfig;
+    map['.pts'] = ptsIconConfig;
     const ptsClasses = _getAllPtsClasses();
     for (const cls of ptsClasses) {
         map[cls] = ptsIconConfig;
@@ -687,6 +691,7 @@ function _enrichAssetConfigMap(map: Record<string, any>) {
     };
 
     map['pts'] = ptsConfig;
+    map['.pts'] = ptsConfig;
     const ptsClasses = _getAllPtsClasses();
     for (const cls of ptsClasses) {
         map[cls] = {
@@ -705,7 +710,13 @@ function _matchesPattern(urlOrPath: string, pattern?: string): boolean {
     const target = urlOrPath.replace(/\\/g, '/');
     const pat = pattern.replace(/\\/g, '/');
 
-    if (pat === '*' || pat === '**' || pat === 'db://assets/**') {
+    // Negation pattern support: "!pattern"
+    if (pat.startsWith('!')) {
+        const positivePattern = pat.slice(1);
+        return !_matchesPattern(target, positivePattern);
+    }
+
+    if (pat === '*' || pat === '**' || pat === 'db://assets/**' || pat === 'db://**') {
         return true;
     }
 
@@ -733,11 +744,13 @@ function _matchesPattern(urlOrPath: string, pattern?: string): boolean {
     }
 }
 
-async function _filterAndEnrichQueryAssets(result: any[], options?: any): Promise<any[]> {
-    if (!Array.isArray(result)) return result;
+async function _filterAndEnrichQueryAssets(result: any, options?: any): Promise<any> {
+    const isWrapped = result && !Array.isArray(result) && Array.isArray(result.assets);
+    const list: any[] = isWrapped ? result.assets : (Array.isArray(result) ? result : null);
+    if (!list) return result;
 
     // 1. Enrich any .pts items already present in result
-    for (const item of result) {
+    for (const item of list) {
         if (item) _enrichPtsAssetInfo(item);
     }
 
@@ -824,7 +837,7 @@ async function _filterAndEnrichQueryAssets(result: any[], options?: any): Promis
         };
         for (const d of searchDirs) scan(d);
 
-        const existingUuids = new Set(result.map((r: any) => r && r.uuid));
+        const existingUuids = new Set(list.map((r: any) => r && r.uuid));
 
         for (const ptsFile of allPtsFiles) {
             const typeInfo = getPtsTypeInfo(ptsFile);
@@ -844,8 +857,11 @@ async function _filterAndEnrichQueryAssets(result: any[], options?: any): Promis
             const url = `db://${relPath}`;
 
             // Strictly check options.pattern
-            if (options && options.pattern && !_matchesPattern(url, options.pattern) && !_matchesPattern(ptsFile, options.pattern)) {
-                continue;
+            if (options && options.pattern) {
+                const matchesPat = _matchesPattern(url, options.pattern) ||
+                                   _matchesPattern(ptsFile, options.pattern) ||
+                                   _matchesPattern(path.basename(ptsFile, '.pts'), options.pattern);
+                if (!matchesPat) continue;
             }
 
             const metaFile = `${ptsFile}.meta`;
@@ -861,14 +877,16 @@ async function _filterAndEnrichQueryAssets(result: any[], options?: any): Promis
             existingUuids.add(uuid);
             const assetName = path.basename(ptsFile, '.pts');
 
-            result.push({
+            list.push({
                 uuid,
-                path: ptsFile,
+                path: url,
                 file: ptsFile,
                 url,
                 name: assetName,
                 displayName: path.basename(ptsFile),
                 type: typeInfo.type,
+                ccType: typeInfo.type,
+                importer: 'pts',
                 extends: typeInfo.extends,
                 imported: true,
                 invalid: false,
@@ -881,7 +899,7 @@ async function _filterAndEnrichQueryAssets(result: any[], options?: any): Promis
         console.error('[pts-asset] Error scanning .pts assets for query:', scanErr);
     }
 
-    return result;
+    return isWrapped ? { ...result, assets: list } : list;
 }
 
 let _installedIpcHooks = new Map<string, Function>();
@@ -906,7 +924,7 @@ function _createIpcWrapper(channel: string, originalHandler: Function) {
             }
 
             if (pkg === 'asset-db') {
-                if (msg === 'query-assets' && Array.isArray(result)) {
+                if (msg === 'query-assets' && (Array.isArray(result) || (result && Array.isArray(result.assets)))) {
                     result = await _filterAndEnrichQueryAssets(result, opts);
                 } else if (msg === 'query-asset-info' && result) {
                     _enrichPtsAssetInfo(result);
@@ -935,7 +953,7 @@ function _createIpcWrapper(channel: string, originalHandler: Function) {
                         value: 'packages://pts-asset/static/pts.png'
                     };
                 }
-            } else if (channel === 'asset-db:query-assets' && Array.isArray(result)) {
+            } else if (channel === 'asset-db:query-assets' && (Array.isArray(result) || (result && Array.isArray(result.assets)))) {
                 result = await _filterAndEnrichQueryAssets(result, args[0]);
             } else if (channel === 'asset-db:query-asset-info' && result) {
                 _enrichPtsAssetInfo(result);
@@ -1074,7 +1092,7 @@ function _installMessageHook() {
         if (pkg === 'asset-db') {
             if (message === 'query-asset-info' && result) {
                 _enrichPtsAssetInfo(result);
-            } else if (message === 'query-assets' && Array.isArray(result)) {
+            } else if (message === 'query-assets' && (Array.isArray(result) || (result && Array.isArray(result.assets)))) {
                 result = await _filterAndEnrichQueryAssets(result, args[0]);
             } else if (message === 'query-icon-config-map' && result && typeof result === 'object') {
                 _enrichIconConfigMap(result);
