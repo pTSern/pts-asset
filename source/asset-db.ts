@@ -273,16 +273,16 @@ export function load() {
         if (typeof Manager !== 'undefined' && Manager && Manager.assetManager) {
             const am = Manager.assetManager;
 
-            if (_installHook(am, 'encodeAsset', (origEncode) => function(asset: any) {
-                    const info = origEncode.call(am, asset);
+            if (_installHook(am, 'encodeAsset', (origEncode) => function(this: any, asset: any, ...args: any[]) {
+                    const info = origEncode.call(this, asset, ...args);
                     _enrichInfo(info);
                     return info;
                 })) {
                 console.log('[pts-asset:asset-db] Hooked Manager.assetManager.encodeAsset');
             }
 
-            if (_installHook(am, 'queryAssetInfo', (origQueryInfo) => function(uuid: string, dataKeys?: any) {
-                    const info = origQueryInfo.call(am, uuid, dataKeys);
+            if (_installHook(am, 'queryAssetInfo', (origQueryInfo) => function(this: any, uuid: string, ...args: any[]) {
+                    const info = origQueryInfo.call(this, uuid, ...args);
                     _enrichInfo(info);
                     return info;
                 })) {
