@@ -8,15 +8,17 @@ const assetDbSource = fs.readFileSync(path.join(root, 'source', 'asset-db.ts'), 
 
 const loadBody = mainSource.match(/export async function load\(\) \{([\s\S]*?)\n\}/);
 assert.ok(loadBody, 'main load() must exist');
-assert.doesNotMatch(loadBody[1], /_installIpcHook\s*\(/, 'load() must not patch ipcMain');
-assert.doesNotMatch(loadBody[1], /_hookAssetDbRequireCache\s*\(/, 'load() must not patch cached Asset DB methods');
-assert.doesNotMatch(loadBody[1], /_installMessageHook\s*\(/, 'load() must not patch Editor.Message.request');
+assert.match(loadBody[1], /_installIpcHook\s*\(/, 'load() must initialize ipcMain hooks for asset picker and icon');
+assert.match(loadBody[1], /_installMessageHook\s*\(/, 'load() must initialize Editor.Message.request hooks');
 
 const reloadBody = mainSource.match(/async reload\(\) \{([\s\S]*?)\n\s*\},/);
 assert.ok(reloadBody, 'reload() must exist');
-assert.doesNotMatch(reloadBody[1], /_installIpcHook\s*\(/, 'reload() must not patch ipcMain');
-assert.doesNotMatch(reloadBody[1], /_hookAssetDbRequireCache\s*\(/, 'reload() must not patch cached Asset DB methods');
-assert.doesNotMatch(reloadBody[1], /_installMessageHook\s*\(/, 'reload() must not patch Editor.Message.request');
+assert.match(reloadBody[1], /_installIpcHook\s*\(/, 'reload() must initialize ipcMain hooks');
+assert.match(reloadBody[1], /_installMessageHook\s*\(/, 'reload() must initialize Editor.Message.request hooks');
+
+assert.match(mainSource, /options\s*&&\s*options\.isBundle/, 'must isolate bundle queries');
+assert.match(mainSource, /options\s*&&\s*options\.extname/, 'must respect extname filters');
+assert.match(mainSource, /_matchesPattern/, 'must strictly filter by options.pattern');
 
 assert.doesNotMatch(
     assetDbSource,

@@ -128,8 +128,14 @@ export const methods: { [key: string]: (...any: any) => any } = {
         }
     },
     async reload() {
-        console.log('[pts-asset] Reloading extension cache...');
+        console.log('[pts-asset] Reloading extension cache and hooks...');
         _ptsTypeCache.clear();
+        _installIpcHook();
+        _hookAssetDbRequireCache();
+        _installMessageHook();
+        try {
+            _getAllPtsClasses();
+        } catch {}
     },
     async onSelectionSelect(type: string, uuid: string) {
         console.log("onSelectionSelect >>", type, uuid);
@@ -563,6 +569,12 @@ function _isPtsUuid(uuid: string): boolean {
     if (_ptsUuids.has(uuid)) return true;
     if (_ptsTypeCache.has(uuid)) return true;
     if (uuid.endsWith('.pts') || uuid.endsWith('.pts.meta')) return true;
+    if (_ptsUuids.size === 0) {
+        try {
+            _getAllPtsClasses();
+        } catch {}
+        if (_ptsUuids.has(uuid)) return true;
+    }
     const typeInfo = getPtsTypeInfo(uuid);
     if (typeInfo) {
         _ptsUuids.add(uuid);
@@ -688,12 +700,59 @@ function _enrichAssetConfigMap(map: Record<string, any>) {
 }
 
 
+function _matchesPattern(urlOrPath: string, pattern?: string): boolean {
+    if (!pattern) return true;
+    const target = urlOrPath.replace(/\\/g, '/');
+    const pat = pattern.replace(/\\/g, '/');
+
+    if (pat === '*' || pat === '**' || pat === 'db://assets/**') {
+        return true;
+    }
+
+    if (pat.endsWith('/**')) {
+        const prefix = pat.slice(0, -3);
+        return target.startsWith(prefix);
+    }
+
+    if (pat.endsWith('/*')) {
+        const prefix = pat.slice(0, -2);
+        if (!target.startsWith(prefix)) return false;
+        const remainder = target.slice(prefix.length).replace(/^\//, '');
+        return !remainder.includes('/');
+    }
+
+    try {
+        const escaped = pat
+            .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+            .replace(/\*\*/g, '___DOUBLE_STAR___')
+            .replace(/\*/g, '[^/]*')
+            .replace(/___DOUBLE_STAR___/g, '.*');
+        return new RegExp(`^${escaped}$`, 'i').test(target);
+    } catch {
+        return target.includes(pat.replace(/\*/g, ''));
+    }
+}
+
 async function _filterAndEnrichQueryAssets(result: any[], options?: any): Promise<any[]> {
     if (!Array.isArray(result)) return result;
 
     // 1. Enrich any .pts items already present in result
     for (const item of result) {
         if (item) _enrichPtsAssetInfo(item);
+    }
+
+    // If options indicate bundle-only query, do not inject .pts files
+    if (options && options.isBundle) {
+        return result;
+    }
+
+    // If extname is explicitly filtered and does not include .pts, do not inject
+    if (options && options.extname) {
+        const extList = Array.isArray(options.extname) ? options.extname : [options.extname];
+        const allowsPts = extList.some((e: any) => typeof e === 'string' && (e.toLowerCase() === '.pts' || e.toLowerCase() === 'pts'));
+        if (!allowsPts) {
+            return result;
+        }
     }
 
     // 2. Extract requested types from options
@@ -709,84 +768,185 @@ async function _filterAndEnrichQueryAssets(result: any[], options?: any): Promis
         }
     }
 
-    // 3. If specific types were requested (e.g. 'GamePlay_Match_pConfig')
-    if (requestedTypes.length > 0) {
-        try {
-            const projectPath = (typeof Editor !== 'undefined' && Editor.Project && Editor.Project.path) ? Editor.Project.path : process.cwd();
-            const searchDirs = [
-                path.join(projectPath, 'assets'),
-                path.join(projectPath, 'extensions/pts-asset/assets')
-            ];
-            const allPtsFiles: string[] = [];
+    // If no type requested, native results already contain all files
+    if (requestedTypes.length === 0) {
+        return result;
+    }
 
-            const scan = (dir: string) => {
-                if (!fs.existsSync(dir)) return;
-                const entries = fs.readdirSync(dir, { withFileTypes: true });
-                for (const e of entries) {
-                    if (e.name === 'node_modules' || e.name === '.git') continue;
-                    const full = path.join(dir, e.name);
-                    if (e.isDirectory()) scan(full);
-                    else if (e.isFile() && e.name.endsWith('.pts')) allPtsFiles.push(full);
-                }
-            };
-            for (const d of searchDirs) scan(d);
+    // Built-in non-pts engine types that should never match .pts
+    const standardEngineTypes = new Set([
+        'cc.Prefab', 'cc.SpriteFrame', 'cc.AudioClip', 'cc.Material',
+        'cc.EffectAsset', 'cc.SceneAsset', 'cc.ParticleAsset', 'cc.Mesh',
+        'cc.Texture2D', 'cc.TextAsset', 'cc.JsonAsset', 'cc.Script',
+        'cc.AnimationClip', 'cc.Skeleton', 'sp.SkeletonData'
+    ]);
 
-            const existingUuids = new Set(result.map((r: any) => r && r.uuid));
+    // Check if query is looking for general Cocos types
+    const onlyGenericTypes = requestedTypes.every(req => !req || req === 'all' || req === 'cc.Asset' || req === 'cc.Object' || standardEngineTypes.has(req));
+    if (onlyGenericTypes) {
+        // Native asset-db already handles generic cc.Asset queries; injecting project-wide
+        // assets here breaks bundle isolation during builds.
+        return result;
+    }
 
-            for (const ptsFile of allPtsFiles) {
-                const typeInfo = getPtsTypeInfo(ptsFile);
-                if (!typeInfo) continue;
+    // Check if at least one requested type is related to pTS
+    const allPtsClasses = _getAllPtsClasses();
+    const isPtsRequested = requestedTypes.some(req => {
+        if (!req) return false;
+        if (req === 'pts' || req === 'pTSAsset') return true;
+        if (allPtsClasses.has(req)) return true;
+        const chain = getExtendsChain(req);
+        return Array.isArray(chain) && (chain.includes('pTSAsset') || chain.includes('pts'));
+    });
 
-                // Check if matches requested type or extends it
-                const matches = requestedTypes.some(req => {
-                    if (!req || req === 'all' || req === 'cc.Asset') return true;
-                    if (typeInfo.type === req) return true;
-                    if (Array.isArray(typeInfo.extends) && typeInfo.extends.includes(req)) return true;
-                    return false;
-                });
+    if (!isPtsRequested) {
+        return result;
+    }
 
-                if (matches) {
-                    const metaFile = `${ptsFile}.meta`;
-                    let uuid = '';
-                    if (fs.existsSync(metaFile)) {
-                        try {
-                            const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
-                            uuid = meta.uuid || '';
-                        } catch {}
-                    }
-                    if (!uuid || existingUuids.has(uuid)) continue;
+    // 3. Scan and inject matching .pts assets
+    try {
+        const projectPath = (typeof Editor !== 'undefined' && Editor.Project && Editor.Project.path) ? Editor.Project.path : process.cwd();
+        const searchDirs = [
+            path.join(projectPath, 'assets'),
+            path.join(projectPath, 'extensions/pts-asset/assets')
+        ];
+        const allPtsFiles: string[] = [];
 
-                    existingUuids.add(uuid);
-                    const relPath = path.relative(projectPath, ptsFile).replace(/\\/g, '/');
-                    const url = `db://${relPath}`;
-                    const assetName = path.basename(ptsFile, '.pts');
-
-                    result.push({
-                        uuid,
-                        path: ptsFile,
-                        file: ptsFile,
-                        url,
-                        name: assetName,
-                        displayName: path.basename(ptsFile),
-                        type: typeInfo.type,
-                        extends: typeInfo.extends,
-                        imported: true,
-                        invalid: false,
-                        visible: true,
-                        readonly: false
-                    });
-                    console.log(`[pts-asset] Injected matching .pts asset for ${requestedTypes.join(',')}: ${assetName} (${typeInfo.type})`);
-                }
+        const scan = (dir: string) => {
+            if (!fs.existsSync(dir)) return;
+            const entries = fs.readdirSync(dir, { withFileTypes: true });
+            for (const e of entries) {
+                if (e.name === 'node_modules' || e.name === '.git') continue;
+                const full = path.join(dir, e.name);
+                if (e.isDirectory()) scan(full);
+                else if (e.isFile() && e.name.endsWith('.pts')) allPtsFiles.push(full);
             }
-        } catch (scanErr) {
-            console.error('[pts-asset] Error scanning .pts assets for query:', scanErr);
+        };
+        for (const d of searchDirs) scan(d);
+
+        const existingUuids = new Set(result.map((r: any) => r && r.uuid));
+
+        for (const ptsFile of allPtsFiles) {
+            const typeInfo = getPtsTypeInfo(ptsFile);
+            if (!typeInfo) continue;
+
+            const matches = requestedTypes.some(req => {
+                if (!req) return false;
+                if (req === 'pts' || req === 'pTSAsset') return true;
+                if (typeInfo.type === req) return true;
+                if (Array.isArray(typeInfo.extends) && typeInfo.extends.includes(req)) return true;
+                return false;
+            });
+
+            if (!matches) continue;
+
+            const relPath = path.relative(projectPath, ptsFile).replace(/\\/g, '/');
+            const url = `db://${relPath}`;
+
+            // Strictly check options.pattern
+            if (options && options.pattern && !_matchesPattern(url, options.pattern) && !_matchesPattern(ptsFile, options.pattern)) {
+                continue;
+            }
+
+            const metaFile = `${ptsFile}.meta`;
+            let uuid = '';
+            if (fs.existsSync(metaFile)) {
+                try {
+                    const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+                    uuid = meta.uuid || '';
+                } catch {}
+            }
+            if (!uuid || existingUuids.has(uuid)) continue;
+
+            existingUuids.add(uuid);
+            const assetName = path.basename(ptsFile, '.pts');
+
+            result.push({
+                uuid,
+                path: ptsFile,
+                file: ptsFile,
+                url,
+                name: assetName,
+                displayName: path.basename(ptsFile),
+                type: typeInfo.type,
+                extends: typeInfo.extends,
+                imported: true,
+                invalid: false,
+                visible: true,
+                readonly: false
+            });
+            console.log(`[pts-asset] Injected matching .pts asset for ${requestedTypes.join(',')}: ${assetName} (${typeInfo.type})`);
         }
+    } catch (scanErr) {
+        console.error('[pts-asset] Error scanning .pts assets for query:', scanErr);
     }
 
     return result;
 }
 
 let _installedIpcHooks = new Map<string, Function>();
+
+function _createIpcWrapper(channel: string, originalHandler: Function) {
+    return async function(this: any, event: any, ...args: any[]) {
+        let result = await originalHandler.call(this, event, ...args);
+
+        try {
+            let pkg = '';
+            let msg = '';
+            let opts: any = null;
+
+            if (typeof args[0] === 'string' && typeof args[1] === 'string') {
+                pkg = args[0];
+                msg = args[1];
+                opts = args[2];
+            } else if (args[0] && typeof args[0] === 'object') {
+                pkg = args[0].pkg || args[0].package || '';
+                msg = args[0].msg || args[0].message || '';
+                opts = args[0].data || args[0].options || args[1];
+            }
+
+            if (pkg === 'asset-db') {
+                if (msg === 'query-assets' && Array.isArray(result)) {
+                    result = await _filterAndEnrichQueryAssets(result, opts);
+                } else if (msg === 'query-asset-info' && result) {
+                    _enrichPtsAssetInfo(result);
+                } else if (msg === 'query-icon-config-map' && result && typeof result === 'object') {
+                    _enrichIconConfigMap(result);
+                } else if (msg === 'query-asset-config-map' && result && typeof result === 'object') {
+                    _enrichAssetConfigMap(result);
+                } else if (msg === 'query-asset-thumbnail') {
+                    const targetUuid = typeof opts === 'string' ? opts : (opts && opts.uuid ? opts.uuid : args[2]);
+                    if (_isPtsUuid(targetUuid)) {
+                        result = {
+                            type: 'image',
+                            value: 'packages://pts-asset/static/pts.png'
+                        };
+                    }
+                }
+            } else if (channel === 'asset-db:query-icon-config-map' && result && typeof result === 'object') {
+                _enrichIconConfigMap(result);
+            } else if (channel === 'asset-db:query-asset-config-map' && result && typeof result === 'object') {
+                _enrichAssetConfigMap(result);
+            } else if (channel === 'asset-db:query-asset-thumbnail') {
+                const targetUuid = args[0];
+                if (_isPtsUuid(targetUuid)) {
+                    result = {
+                        type: 'image',
+                        value: 'packages://pts-asset/static/pts.png'
+                    };
+                }
+            } else if (channel === 'asset-db:query-assets' && Array.isArray(result)) {
+                result = await _filterAndEnrichQueryAssets(result, args[0]);
+            } else if (channel === 'asset-db:query-asset-info' && result) {
+                _enrichPtsAssetInfo(result);
+            }
+        } catch (e) {
+            console.error('[pts-asset] Error in IPC message hook:', e);
+        }
+
+        return result;
+    };
+}
 
 function _installIpcHook() {
     try {
@@ -797,62 +957,7 @@ function _installIpcHook() {
         for (const [channel, originalHandler] of ipcMain._invokeHandlers.entries()) {
             if (_installedIpcHooks.has(channel)) continue;
 
-            const wrappedHandler = async function(event: any, ...args: any[]) {
-                let result = await originalHandler.call(ipcMain, event, ...args);
-
-                try {
-                    let pkg = '';
-                    let msg = '';
-                    let opts: any = null;
-
-                    if (typeof args[0] === 'string' && typeof args[1] === 'string') {
-                        pkg = args[0];
-                        msg = args[1];
-                        opts = args[2];
-                    } else if (args[0] && typeof args[0] === 'object') {
-                        pkg = args[0].pkg || args[0].package || '';
-                        msg = args[0].msg || args[0].message || '';
-                        opts = args[0].data || args[0].options || args[1];
-                    }
-
-                    if (pkg === 'asset-db') {
-                        if (msg === 'query-assets' && Array.isArray(result)) {
-                            result = await _filterAndEnrichQueryAssets(result, opts);
-                        } else if (msg === 'query-asset-info' && result) {
-                            _enrichPtsAssetInfo(result);
-                        } else if (msg === 'query-icon-config-map' && result && typeof result === 'object') {
-                            _enrichIconConfigMap(result);
-                        } else if (msg === 'query-asset-config-map' && result && typeof result === 'object') {
-                            _enrichAssetConfigMap(result);
-                        } else if (msg === 'query-asset-thumbnail') {
-                            const targetUuid = typeof opts === 'string' ? opts : (opts && opts.uuid ? opts.uuid : args[2]);
-                            if (_isPtsUuid(targetUuid)) {
-                                result = {
-                                    type: 'image',
-                                    value: 'packages://pts-asset/static/pts.png'
-                                };
-                            }
-                        }
-                    } else if (channel === 'asset-db:query-icon-config-map' && result && typeof result === 'object') {
-                        _enrichIconConfigMap(result);
-                    } else if (channel === 'asset-db:query-asset-config-map' && result && typeof result === 'object') {
-                        _enrichAssetConfigMap(result);
-                    } else if (channel === 'asset-db:query-asset-thumbnail') {
-                        const targetUuid = args[0];
-                        if (_isPtsUuid(targetUuid)) {
-                            result = {
-                                type: 'image',
-                                value: 'packages://pts-asset/static/pts.png'
-                            };
-                        }
-                    }
-                } catch (e) {
-                    console.error('[pts-asset] Error in IPC message hook:', e);
-                }
-
-                return result;
-            };
-
+            const wrappedHandler = _createIpcWrapper(channel, originalHandler);
             _installedIpcHooks.set(channel, originalHandler);
             ipcMain._invokeHandlers.set(channel, wrappedHandler);
             console.log(`[pts-asset] Hooked ipcMain invoke channel: ${channel}`);
@@ -1004,10 +1109,14 @@ function _uninstallMessageHook() {
  */
 export async function load() {
     checkPtsCoreDependency(false);
+    _installIpcHook();
+    _hookAssetDbRequireCache();
+    _installMessageHook();
 
-    // Do not globally intercept Asset DB queries. Cocos callers depend on filters
-    // such as directory/bundle scope being preserved exactly; augmenting those
-    // results with unrelated .pts records breaks the Builder bundle workflow.
+    // Warm up pts classes and UUID registry
+    try {
+        _getAllPtsClasses();
+    } catch {}
 
     try {
         const projectPath = (typeof Editor !== 'undefined' && Editor.Project && Editor.Project.path) ? Editor.Project.path : process.cwd();
@@ -1024,6 +1133,7 @@ export async function load() {
             if (chains && typeof chains === 'object') {
                 setRuntimeInheritanceChains(chains);
                 _ptsTypeCache.clear();
+                _getAllPtsClasses();
             }
         }).catch(() => {});
     } catch {}
