@@ -1,0 +1,15 @@
+{
+  "ver": "1.0.0",
+  "importer": "*",
+  "imported": true,
+  "uuid": "929a9cab-e0cc-45b3-a371-57d0f1b0314c",
+  "files": [
+    ".json",
+    ".pts"
+  ],
+  "subMetas": {},
+  "userData": {
+    "__type__": "pTSAction_Condition_Looper_Instantly",
+    "__depends__": []
+  }
+}
