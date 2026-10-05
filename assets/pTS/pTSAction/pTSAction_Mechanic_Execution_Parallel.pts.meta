@@ -1,0 +1,15 @@
+{
+  "ver": "1.0.0",
+  "importer": "*",
+  "imported": true,
+  "uuid": "afbfcd89-bb03-483d-9752-d96d8e0fecef",
+  "files": [
+    ".json",
+    ".pts"
+  ],
+  "subMetas": {},
+  "userData": {
+    "__type__": "pTSAction_Mechanic_Execution_Parallel",
+    "__depends__": []
+  }
+}
