@@ -10,6 +10,7 @@ interface _I {
 }
 
 @ccclass("pTSAsset_Skeleton")
+@pTSAsset.menu("Animation/Skeleton")
 export class pTSAsset_Skeleton extends pTSAsset {
     @property({ type: sp.SkeletonData })
     data: sp.SkeletonData = null

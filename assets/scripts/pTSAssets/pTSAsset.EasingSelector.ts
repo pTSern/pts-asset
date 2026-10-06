@@ -7,6 +7,7 @@ import { Helper_Selector_Smart } from 'db://pts-core/scripts/helper/Selector/Hel
 const { ccclass, property } = _decorator;
 
 @ccclass('pTSAsset_EasingSelector')
+@pTSAsset.menu('Animation/EasingSelector')
 export class pTSAsset_EasingSelector extends pTSAsset {
     @property({ type: Type_CCEasing })
     easing: TweenEasing = 'linear'

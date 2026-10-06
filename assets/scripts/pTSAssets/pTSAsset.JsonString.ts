@@ -1,9 +1,11 @@
 import { _decorator } from 'cc';
+import { pTSAsset } from 'db://pts-core/scripts/pTSAsset';
 import { pTSAsset_Data } from 'db://pts-core/scripts/pTSAsset/pTSAsset.Data';
 
 const { ccclass, property } = _decorator;
 
 @ccclass('pTSAsset_JsonString')
+@pTSAsset.menu('Primitive/JsonString')
 export class pTSAsset_JsonString extends pTSAsset_Data<pFlex.TJsonString, object> {
     protected _add(old: string, value: string): string {
         return JSON.stringify({ ...this._clone(old), ...this._clone(value) });

@@ -1,9 +1,11 @@
 import { _decorator } from 'cc';
+import { pTSAsset } from 'db://pts-core/scripts/pTSAsset';
 import { pTSAsset_Data } from 'db://pts-core/scripts/pTSAsset/pTSAsset.Data';
 
 const { ccclass, property } = _decorator;
 
 @ccclass('pTSAsset_Number')
+@pTSAsset.menu('Primitive/Number')
 export class pTSAsset_Number extends pTSAsset_Data<number> {
 
     protected _add(old: number, value: number): number {

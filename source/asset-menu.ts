@@ -36,9 +36,19 @@ export interface MenuAssetInfo {
 
 let _cachedClasses: string[] = [];
 export const _cachedAbstractClasses = new Set<string>();
+export const _cachedMenuPaths = new Map<string, string>();
+export const _cachedHiddenClasses = new Set<string>();
 
 export function isAbstractClass(className: string): boolean {
     return _cachedAbstractClasses.has(className);
+}
+
+export function getMenuPath(className: string): string | undefined {
+    return _cachedMenuPaths.get(className);
+}
+
+export function setMenuPath(className: string, menuPath: string) {
+    _cachedMenuPaths.set(className, menuPath);
 }
 
 /**
@@ -215,7 +225,7 @@ export function scanProjectPtsClasses(): string[] {
                     const modifiers = match[1] || '';
                     const tsClassName = match[2];
                     const parentClass = match[3].split('.').pop();
-                    if (parentClass && knownPtsClasses.has(parentClass)) {
+                    if ((parentClass && knownPtsClasses.has(parentClass)) || tsClassName === 'pTSAsset') {
                         let finalClassName = tsClassName;
                         const textBefore = content.substring(0, match.index);
                         const ccMatches = [...textBefore.matchAll(/@ccclass\s*\(\s*['"]([^'"]+)['"]\s*\)/g)];
@@ -223,6 +233,31 @@ export function scanProjectPtsClasses(): string[] {
                             const lastCc = ccMatches[ccMatches.length - 1];
                             if (!textBefore.substring(lastCc.index!).includes('class ')) {
                                 finalClassName = lastCc[1];
+                            }
+                        }
+
+                        // Extract menu path from decorator in textBefore (e.g. @pTSAsset.menu("A/B/C"), @menu("A/B/C"))
+                        const menuRegex = /@(?:pTSAsset\.|_decorator\.)?menu\s*\(\s*(?:['"`]([^'"`]+)['"`]|(?:\{\s*path\s*:\s*['"`]([^'"`]+)['"`]))/g;
+                        const menuMatches = [...textBefore.matchAll(menuRegex)];
+                        if (menuMatches.length > 0) {
+                            const lastMenu = menuMatches[menuMatches.length - 1];
+                            if (!textBefore.substring(lastMenu.index!).includes('class ')) {
+                                const menuPath = (lastMenu[1] || lastMenu[2] || '').trim();
+                                if (menuPath) {
+                                    _cachedMenuPaths.set(finalClassName, menuPath);
+                                    _cachedMenuPaths.set(tsClassName, menuPath);
+                                }
+                            }
+                        }
+
+                        // Check explicit hide (e.g. @pTSAsset.menu(false), @menu(false), @pTSAsset.menu({ hide: true }))
+                        const hideRegex = /@(?:pTSAsset\.|_decorator\.)?menu\s*\(\s*(?:false|null|""|''|``|\{\s*hide\s*:\s*true)/g;
+                        const hideMatches = [...textBefore.matchAll(hideRegex)];
+                        if (hideMatches.length > 0) {
+                            const lastHide = hideMatches[hideMatches.length - 1];
+                            if (!textBefore.substring(lastHide.index!).includes('class ')) {
+                                _cachedHiddenClasses.add(finalClassName);
+                                _cachedHiddenClasses.add(tsClassName);
                             }
                         }
 
@@ -264,9 +299,9 @@ export function scanProjectPtsClasses(): string[] {
     }
 
     const sortedClasses = Array.from(classes)
-        .filter(c => !abstractClasses.has(c) && !_cachedAbstractClasses.has(c))
+        .filter(c => !abstractClasses.has(c) && !_cachedAbstractClasses.has(c) && !_cachedHiddenClasses.has(c))
         .sort();
-    console.log(`[pts-asset] scanProjectPtsClasses: registered ${sortedClasses.length} concrete classes (ignored ${abstractClasses.size} abstract):`, sortedClasses);
+    console.log(`[pts-asset] scanProjectPtsClasses: registered ${sortedClasses.length} concrete classes (ignored ${abstractClasses.size} abstract, ${sortedClasses.length} visible):`, sortedClasses);
     return sortedClasses;
 }
 
@@ -277,22 +312,30 @@ export async function getRegisteredClasses(): Promise<string[]> {
     const scanned = scanProjectPtsClasses();
     const classes = new Set<string>(scanned);
     try {
-        const sceneClasses: string[] = await Editor.Message.request('scene', 'execute-scene-script', {
+        const sceneClasses: any[] = await Editor.Message.request('scene', 'execute-scene-script', {
             name: 'pts-core',
             method: 'get_registered_pts_classes',
             args: []
         });
         if (Array.isArray(sceneClasses)) {
-            for (const cls of sceneClasses) {
-                if (cls && typeof cls === 'string' && !_cachedAbstractClasses.has(cls)) {
-                    classes.add(cls);
+            for (const item of sceneClasses) {
+                const clsName = typeof item === 'string' ? item : item?.name;
+                if (clsName && typeof clsName === 'string' && !_cachedAbstractClasses.has(clsName)) {
+                    if (item && item.hide) {
+                        _cachedHiddenClasses.add(clsName);
+                        continue;
+                    }
+                    classes.add(clsName);
+                    if (item && item.menu) {
+                        _cachedMenuPaths.set(clsName, item.menu);
+                    }
                 }
             }
         }
     } catch {}
 
     const result = Array.from(classes)
-        .filter(c => !_cachedAbstractClasses.has(c))
+        .filter(c => !_cachedAbstractClasses.has(c) && !_cachedHiddenClasses.has(c))
         .sort();
     if (result.length > 0) {
         _cachedClasses = result;
@@ -423,6 +466,105 @@ export async function createAndInitPtsAsset(assetInfo: MenuAssetInfo | undefined
 }
 
 /**
+ * Parse menu path such as "A/B/C" into folders ["A", "B"] and leaf item name "C".
+ * If path is "A" -> folder ["A"], leaf name className.
+ * If path is "A/B/" -> folders ["A", "B"], leaf name className.
+ */
+export function parseMenuPath(rawPath: string, className: string): { folders: string[], leafName: string } {
+    const raw = rawPath.trim();
+    if (raw.endsWith('/')) {
+        const folders = raw.split('/').map(s => s.trim()).filter(Boolean);
+        return { folders, leafName: className };
+    }
+    const parts = raw.split('/').map(s => s.trim()).filter(Boolean);
+    if (parts.length === 0) {
+        return { folders: [], leafName: className };
+    }
+    if (parts.length === 1) {
+        return { folders: [parts[0]], leafName: className };
+    }
+    return {
+        folders: parts.slice(0, parts.length - 1),
+        leafName: parts[parts.length - 1]
+    };
+}
+
+interface IMenuNode {
+    name: string;
+    submenus: Map<string, IMenuNode>;
+    items: { label: string; className: string }[];
+}
+
+function createMenuNode(name: string): IMenuNode {
+    return {
+        name,
+        submenus: new Map(),
+        items: []
+    };
+}
+
+function convertNodeToMenuItems(node: IMenuNode, assetInfo?: MenuAssetInfo): IMenuItem[] {
+    const result: IMenuItem[] = [];
+
+    // 1. Sorted submenus (folders)
+    const sortedSubNames = Array.from(node.submenus.keys()).sort((a, b) => a.localeCompare(b));
+    for (const subName of sortedSubNames) {
+        const subNode = node.submenus.get(subName)!;
+        const subItems = convertNodeToMenuItems(subNode, assetInfo);
+        if (subItems.length > 0) {
+            result.push({
+                label: subName,
+                submenu: subItems
+            });
+        }
+    }
+
+    // 2. Separator if there are both submenus and leaf items at this folder level
+    if (result.length > 0 && node.items.length > 0) {
+        result.push({ type: 'separator' });
+    }
+
+    // 3. Sorted leaf items
+    const sortedItems = [...node.items].sort((a, b) => a.label.localeCompare(b.label));
+    for (const item of sortedItems) {
+        result.push({
+            label: item.label,
+            click() {
+                createAndInitPtsAsset(assetInfo, item.className);
+            }
+        });
+    }
+
+    return result;
+}
+
+export function buildHierarchicalMenu(classes: string[], assetInfo?: MenuAssetInfo): IMenuItem[] {
+    const root = createMenuNode('root');
+
+    for (const cls of classes) {
+        if (_cachedHiddenClasses.has(cls)) continue;
+
+        const rawMenu = _cachedMenuPaths.get(cls);
+        if (rawMenu) {
+            const { folders, leafName } = parseMenuPath(rawMenu, cls);
+            let current = root;
+            for (const folder of folders) {
+                if (!current.submenus.has(folder)) {
+                    current.submenus.set(folder, createMenuNode(folder));
+                }
+                current = current.submenus.get(folder)!;
+            }
+            current.items.push({ label: leafName, className: cls });
+        } else {
+            // Uncategorized class -> root level
+            root.items.push({ label: cls, className: cls });
+        }
+    }
+
+    return convertNodeToMenuItems(root, assetInfo);
+}
+
+/**
  * Assets panel Create menu contribution (+ button or Right Click -> Create).
  */
 export function onCreateMenu(assetInfo?: MenuAssetInfo): IMenuItem[] {
@@ -439,7 +581,7 @@ export function onCreateMenu(assetInfo?: MenuAssetInfo): IMenuItem[] {
     }).catch(() => {});
 
     const classes = (_cachedClasses.length > 0 ? _cachedClasses : scanProjectPtsClasses())
-        .filter(c => !_cachedAbstractClasses.has(c));
+        .filter(c => !_cachedAbstractClasses.has(c) && !_cachedHiddenClasses.has(c));
 
     if (classes.length === 0) {
         return [
@@ -458,12 +600,7 @@ export function onCreateMenu(assetInfo?: MenuAssetInfo): IMenuItem[] {
     return [
         {
             label: 'Create pTS Asset',
-            submenu: classes.map(className => ({
-                label: className,
-                click() {
-                    createAndInitPtsAsset(assetInfo, className);
-                }
-            }))
+            submenu: buildHierarchicalMenu(classes, assetInfo)
         }
     ];
 }

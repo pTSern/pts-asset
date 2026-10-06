@@ -1,10 +1,12 @@
 
 import { _decorator } from 'cc';
+import { pTSAsset } from 'db://pts-core/scripts/pTSAsset';
 import { pTSAsset_Number } from './pTSAsset.Number';
 
 const { ccclass, property } = _decorator;
 
 @ccclass('pTSAsset_Range')
+@pTSAsset.menu('Primitive/Range')
 export class pTSAsset_Range extends pTSAsset_Number {
     @property({  })
     min: number = 0
