@@ -1,10 +1,12 @@
 
 import { _decorator, CCString } from 'cc';
+import { pTSAsset } from 'db://pts-core/scripts/pTSAsset';
 import { pTSAsset_Data } from 'db://pts-core/scripts/pTSAsset/pTSAsset.Data';
 
 const { ccclass, property } = _decorator;
 
 @ccclass('pTSAsset_Strings')
+@pTSAsset.menu('Primitive/Strings')
 export class pTSAsset_Strings extends pTSAsset_Data<string[]> {
     @property({ type: [CCString] })
     data: string[] = [];

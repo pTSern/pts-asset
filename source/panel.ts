@@ -1,5 +1,5 @@
 import pkg from '../package.json';
-import { getRegisteredClasses, scanProjectPtsClasses } from './asset-menu';
+import { getRegisteredClasses, getMenuPath, scanProjectPtsClasses } from './asset-menu';
 
 export const template = `
 <div class="panel-container">
@@ -151,7 +151,11 @@ async function loadRegisteredClasses(panel: any) {
     if (!panel.$.classesList) return;
     const sorted = await getRegisteredClasses();
     if (sorted.length > 0) {
-        panel.$.classesList.innerHTML = sorted.map((c: string) => `<div>• <strong>${c}</strong></div>`).join('');
+        panel.$.classesList.innerHTML = sorted.map((c: string) => {
+            const menuPath = getMenuPath(c);
+            const badge = menuPath ? ` <span style="opacity: 0.6; font-size: 11px;">[${menuPath}]</span>` : '';
+            return `<div>• <strong>${c}</strong>${badge}</div>`;
+        }).join('');
     } else {
         panel.$.classesList.textContent = 'No classes extending pTSAsset detected.';
     }
