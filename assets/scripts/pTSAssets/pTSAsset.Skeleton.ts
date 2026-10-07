@@ -29,6 +29,7 @@ export class pTSAsset_Skeleton extends pTSAsset {
             CCClass.Attr.setClassAttr(this, 'anim', 'type', undefined);
         } else {
             CCClass.Attr.setClassAttr(this, 'anim', 'type', 'Enum');
+            if(typeof this.data.getRuntimeData !== 'function') return;
             const _anims = this.data.getRuntimeData().animations.map(_anim => ({ name: _anim.name, value: _anim.name }));
             CCClass.Attr.setClassAttr(this, 'anim', 'enumList', _anims);
         }
