@@ -18,7 +18,10 @@ export class Data_UI_Displayer<_TType> extends Component {
             return;
         }
         this.data.on('onChanged', this.refresh, this);
+        this._onLoad?.();
     }
+
+    protected _onLoad?(): void
 
     protected onDestroy(): void {
         this.data.off('onChanged', this.refresh, this);
@@ -30,7 +33,6 @@ export class Data_UI_Displayer<_TType> extends Component {
 
     refresh() {
         const _data = this.data.get();
-        console.log(`Data_UI_Displayer[${this.data.name}]: refresh >>> `, _data);
-        this.hooker?.set(this.data.get());
+        this.hooker?.set(_data);
     }
 }
