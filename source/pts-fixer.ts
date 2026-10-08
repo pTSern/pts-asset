@@ -46,12 +46,83 @@ export function normalizeType(type: string): string {
     return type;
 }
 
+export function normalizeCurveValue(vData: any): any {
+    if (!vData || typeof vData !== 'object') {
+        return {
+            keyFrames: [],
+            multiplier: 1,
+            preExtrap: 1,
+            postExtrap: 1,
+            preExtrapolation: 1,
+            postExtrapolation: 1
+        };
+    }
+    const raw = (vData && typeof vData === 'object' && '__value__' in vData) ? vData.__value__ : vData;
+    let keyFrames: any[] = [];
+    if (Array.isArray(raw.keyFrames)) {
+        keyFrames = raw.keyFrames.map((kf: any) => ({
+            time: typeof kf.time === 'number' ? kf.time : (kf.point && typeof kf.point.x === 'number' ? kf.point.x : 0),
+            value: typeof kf.value === 'number' ? kf.value : (kf.point && typeof kf.point.y === 'number' ? kf.point.y : 0),
+            inTangent: typeof kf.inTangent === 'number' ? kf.inTangent : (typeof kf.leftTangent === 'number' ? kf.leftTangent : 0),
+            outTangent: typeof kf.outTangent === 'number' ? kf.outTangent : (typeof kf.rightTangent === 'number' ? kf.rightTangent : 0),
+            inTangentWeight: typeof kf.inTangentWeight === 'number' ? kf.inTangentWeight : (typeof kf.leftTangentWeight === 'number' ? kf.leftTangentWeight : 1),
+            outTangentWeight: typeof kf.outTangentWeight === 'number' ? kf.outTangentWeight : (typeof kf.rightTangentWeight === 'number' ? kf.rightTangentWeight : 1),
+            interpMode: typeof kf.interpMode === 'number' ? kf.interpMode : (typeof kf.interpolationMode === 'number' ? kf.interpolationMode : 0),
+            tangentWeightMode: typeof kf.tangentWeightMode === 'number' ? kf.tangentWeightMode : 0
+        }));
+    } else if (Array.isArray(raw.keys)) {
+        keyFrames = raw.keys.map((k: any) => ({
+            time: typeof k.time === 'number' ? k.time : (k.point && typeof k.point.x === 'number' ? k.point.x : 0),
+            value: typeof k.value === 'number' ? k.value : (k.point && typeof k.point.y === 'number' ? k.point.y : 0),
+            inTangent: typeof k.inTangent === 'number' ? k.inTangent : (typeof k.leftTangent === 'number' ? k.leftTangent : 0),
+            outTangent: typeof k.outTangent === 'number' ? k.outTangent : (typeof k.rightTangent === 'number' ? k.rightTangent : 0),
+            inTangentWeight: typeof k.inTangentWeight === 'number' ? k.inTangentWeight : (typeof k.leftTangentWeight === 'number' ? k.leftTangentWeight : 1),
+            outTangentWeight: typeof k.outTangentWeight === 'number' ? k.outTangentWeight : (typeof k.rightTangentWeight === 'number' ? k.rightTangentWeight : 1),
+            interpMode: typeof k.interpMode === 'number' ? k.interpMode : (typeof k.interpolationMode === 'number' ? k.interpolationMode : 0),
+            tangentWeightMode: typeof k.tangentWeightMode === 'number' ? k.tangentWeightMode : 0
+        }));
+    } else if (Array.isArray(raw._times) && Array.isArray(raw._values)) {
+        keyFrames = raw._times.map((t: number, i: number) => {
+            const v = raw._values[i] || {};
+            return {
+                time: t,
+                value: typeof v.value === 'number' ? v.value : 0,
+                inTangent: typeof v.leftTangent === 'number' ? v.leftTangent : (typeof v.inTangent === 'number' ? v.inTangent : 0),
+                outTangent: typeof v.rightTangent === 'number' ? v.rightTangent : (typeof v.outTangent === 'number' ? v.outTangent : 0),
+                inTangentWeight: typeof v.leftTangentWeight === 'number' ? v.leftTangentWeight : (typeof v.inTangentWeight === 'number' ? v.inTangentWeight : 1),
+                outTangentWeight: typeof v.rightTangentWeight === 'number' ? v.rightTangentWeight : (typeof v.outTangentWeight === 'number' ? v.outTangentWeight : 1),
+                interpMode: typeof v.interpolationMode === 'number' ? v.interpolationMode : (typeof v.interpMode === 'number' ? v.interpMode : 0),
+                tangentWeightMode: typeof v.tangentWeightMode === 'number' ? v.tangentWeightMode : 0
+            };
+        });
+    }
+
+    keyFrames.sort((a, b) => a.time - b.time);
+
+    const preExtrap = typeof raw.preExtrapolation === 'number'
+        ? raw.preExtrapolation
+        : (typeof raw.preExtrap === 'number' ? raw.preExtrap : (typeof raw.preWrapMode === 'number' ? raw.preWrapMode : 1));
+    const postExtrap = typeof raw.postExtrapolation === 'number'
+        ? raw.postExtrapolation
+        : (typeof raw.postExtrap === 'number' ? raw.postExtrap : (typeof raw.postWrapMode === 'number' ? raw.postWrapMode : 1));
+    const multiplier = typeof raw.multiplier === 'number' ? raw.multiplier : 1;
+
+    return {
+        keyFrames,
+        multiplier,
+        preExtrap,
+        postExtrap,
+        preExtrapolation: preExtrap,
+        postExtrapolation: postExtrap
+    };
+}
+
 export function isRealCurve(dump: any): boolean {
     if (!dump) return false;
     const type = normalizeType(dump.type);
-    if (type === 'cc.RealCurve') return true;
-    if (Array.isArray(dump.extends) && dump.extends.includes('cc.RealCurve')) return true;
-    if (dump.value && typeof dump.value === 'object' && Array.isArray(dump.value.keyFrames)) return true;
+    if (type === 'cc.RealCurve' || type === 'RealCurve') return true;
+    if (Array.isArray(dump.extends) && (dump.extends.includes('cc.RealCurve') || dump.extends.includes('RealCurve'))) return true;
+    if (dump.value && typeof dump.value === 'object' && (Array.isArray(dump.value.keyFrames) || Array.isArray(dump.value.keys))) return true;
     return false;
 }
 
@@ -239,42 +310,9 @@ export function populateDumpWithSaved(dump: any, savedVal: any) {
     // 4. RealCurve
     if (isRealCurve(dump)) {
         if (vData && typeof vData === 'object') {
-            let keyFrames: any[] = [];
-            if (Array.isArray(vData.keyFrames)) {
-                keyFrames = vData.keyFrames.map((kf: any) => ({
-                    time: typeof kf.time === 'number' ? kf.time : 0,
-                    value: typeof kf.value === 'number' ? kf.value : 0,
-                    inTangent: typeof kf.inTangent === 'number' ? kf.inTangent : (typeof kf.leftTangent === 'number' ? kf.leftTangent : 0),
-                    outTangent: typeof kf.outTangent === 'number' ? kf.outTangent : (typeof kf.rightTangent === 'number' ? kf.rightTangent : 0),
-                    inTangentWeight: typeof kf.inTangentWeight === 'number' ? kf.inTangentWeight : (typeof kf.leftTangentWeight === 'number' ? kf.leftTangentWeight : 1),
-                    outTangentWeight: typeof kf.outTangentWeight === 'number' ? kf.outTangentWeight : (typeof kf.rightTangentWeight === 'number' ? kf.rightTangentWeight : 1),
-                    interpMode: typeof kf.interpMode === 'number' ? kf.interpMode : (typeof kf.interpolationMode === 'number' ? kf.interpolationMode : 0),
-                    tangentWeightMode: typeof kf.tangentWeightMode === 'number' ? kf.tangentWeightMode : 0
-                }));
-            } else if (Array.isArray(vData._times) && Array.isArray(vData._values)) {
-                keyFrames = vData._times.map((t: number, i: number) => {
-                    const v = vData._values[i] || {};
-                    return {
-                        time: t,
-                        value: typeof v.value === 'number' ? v.value : 0,
-                        inTangent: typeof v.leftTangent === 'number' ? v.leftTangent : (typeof v.inTangent === 'number' ? v.inTangent : 0),
-                        outTangent: typeof v.rightTangent === 'number' ? v.rightTangent : (typeof v.outTangent === 'number' ? v.outTangent : 0),
-                        inTangentWeight: typeof v.leftTangentWeight === 'number' ? v.leftTangentWeight : (typeof v.inTangentWeight === 'number' ? v.inTangentWeight : 1),
-                        outTangentWeight: typeof v.rightTangentWeight === 'number' ? v.rightTangentWeight : (typeof v.outTangentWeight === 'number' ? v.outTangentWeight : 1),
-                        interpMode: typeof v.interpolationMode === 'number' ? v.interpolationMode : (typeof v.interpMode === 'number' ? v.interpMode : 0),
-                        tangentWeightMode: typeof v.tangentWeightMode === 'number' ? v.tangentWeightMode : 0
-                    };
-                });
-            }
-
-            dump.value = {
-                keyFrames,
-                multiplier: typeof vData.multiplier === 'number' ? vData.multiplier : 1,
-                preExtrapolation: vData.preExtrapolation ?? 1,
-                postExtrapolation: vData.postExtrapolation ?? 1
-            };
+            dump.value = normalizeCurveValue(vData);
         } else {
-            dump.value = dump.default || { keyFrames: [], multiplier: 1 };
+            dump.value = dump.default ? normalizeCurveValue(dump.default) : normalizeCurveValue(null);
         }
         return;
     }
@@ -576,25 +614,13 @@ export function extractDumpValue(dump: any, editorProps?: Record<string, any>): 
     }
 
     if (isRealCurve(dump)) {
-        const val = dump.value || {};
-        const rawKeyFrames = Array.isArray(val.keyFrames) ? val.keyFrames : [];
-        const keyFrames = rawKeyFrames.map((kf: any) => ({
-            time: typeof kf.time === 'number' ? kf.time : 0,
-            value: typeof kf.value === 'number' ? kf.value : 0,
-            inTangent: typeof kf.inTangent === 'number' ? kf.inTangent : (typeof kf.leftTangent === 'number' ? kf.leftTangent : 0),
-            outTangent: typeof kf.outTangent === 'number' ? kf.outTangent : (typeof kf.rightTangent === 'number' ? kf.rightTangent : 0),
-            inTangentWeight: typeof kf.inTangentWeight === 'number' ? kf.inTangentWeight : (typeof kf.leftTangentWeight === 'number' ? kf.leftTangentWeight : 1),
-            outTangentWeight: typeof kf.outTangentWeight === 'number' ? kf.outTangentWeight : (typeof kf.rightTangentWeight === 'number' ? kf.rightTangentWeight : 1),
-            interpMode: typeof kf.interpMode === 'number' ? kf.interpMode : (typeof kf.interpolationMode === 'number' ? kf.interpolationMode : 0),
-            tangentWeightMode: typeof kf.tangentWeightMode === 'number' ? kf.tangentWeightMode : 0
-        }));
-
+        const norm = normalizeCurveValue(dump.value);
         return {
             __type__: 'cc.RealCurve',
             __value__: {
-                preExtrapolation: typeof val.preExtrapolation === 'number' ? val.preExtrapolation : 1,
-                postExtrapolation: typeof val.postExtrapolation === 'number' ? val.postExtrapolation : 1,
-                keyFrames
+                preExtrapolation: norm.preExtrap,
+                postExtrapolation: norm.postExtrap,
+                keyFrames: norm.keyFrames
             }
         };
     }

@@ -28,6 +28,7 @@ import {
     setUuidType,
     getUuidType,
     normalizeType,
+    normalizeCurveValue,
     isRealCurve,
     isGradient,
     isValueType,
@@ -187,6 +188,8 @@ let _cachedData: any = null;
 let _currentAsset: Asset | null = null;
 let _lastDump: any = null;
 let _isUpdatingUi = false;
+let _isSaving = false;
+let _lastSaveTime = 0;
 let _lastLazyState: boolean | null = null;
 let _lastForceLazyState: boolean | null = null;
 let _isInLivePreviewMode = false;
@@ -859,6 +862,61 @@ function bindUiAssetEvents(root: Element | DocumentFragment | null, onTrigger: (
     });
 }
 
+function collectAllUiCurves(root: Element | DocumentFragment | null): HTMLElement[] {
+    if (!root) return [];
+    return Array.from(root.querySelectorAll('ui-curve')) as HTMLElement[];
+}
+
+function syncUiCurveToDump(uiCurve: HTMLElement, rootDump: any = _lastDump): boolean {
+    if (!uiCurve || !rootDump || !rootDump.value) return false;
+    const closestUiProp = uiCurve.closest('ui-prop') as any;
+    let targetDump = closestUiProp?.dump;
+    if (!targetDump) {
+        const basicProp = uiCurve.closest('.pts-basic-prop') as HTMLElement;
+        const key = basicProp?.dataset.key;
+        if (key && rootDump.value[key]) {
+            targetDump = rootDump.value[key];
+        }
+    }
+    if (!targetDump) return false;
+
+    const rawVal = (uiCurve as any).value || targetDump.value;
+    if (rawVal) {
+        const normalized = normalizeCurveValue(rawVal);
+        targetDump.value = normalized;
+        if (targetDump.path) {
+            const parts = targetDump.path.split('.');
+            let cur = rootDump.value;
+            for (let i = 0; i < parts.length - 1; i++) {
+                if (cur) cur = cur[parts[i]]?.value || cur[parts[i]];
+            }
+            const last = parts[parts.length - 1];
+            if (cur && cur[last]) {
+                if (cur[last].value) cur[last].value = normalized;
+                else cur[last] = normalized;
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+function bindUiCurveEvents(root: Element | DocumentFragment | null, onTrigger: () => void) {
+    if (!root) return;
+    const curves = collectAllUiCurves(root);
+    curves.forEach((curveEl: any) => {
+        if (curveEl.__pts_bound__) return;
+        curveEl.__pts_bound__ = true;
+        const handleUpdate = () => {
+            console.log(`[pTS Inspector] ui-curve direct event fired:`, curveEl.value);
+            syncUiCurveToDump(curveEl, _lastDump);
+            onTrigger();
+        };
+        curveEl.addEventListener('change', handleUpdate);
+        curveEl.addEventListener('confirm', handleUpdate);
+    });
+}
+
 interface GroupInfo {
     id: string;
     name: string;
@@ -1152,6 +1210,11 @@ async function renderView(this: PanelThis, dumpValue: any) {
         if (_currentTriggerAutoSave) _currentTriggerAutoSave();
     });
 
+    // 5b. Bind events to all rendered ui-curve elements
+    bindUiCurveEvents(this.$.view, () => {
+        if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+    });
+
     if (!(this.$.view as any).__pts_delegated__) {
         (this.$.view as any).__pts_delegated__ = true;
         const handleAssetChange = (e: Event) => {
@@ -1164,6 +1227,14 @@ async function renderView(this: PanelThis, dumpValue: any) {
                 }
                 console.log(`[pTS Inspector] Delegated ui-asset event (${e.type}), new value:`, (assetEl as any).value);
                 syncUiAssetToDump(assetEl, _lastDump);
+                if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                return;
+            }
+
+            const curveEl = target?.closest('ui-curve') as HTMLElement;
+            if (curveEl) {
+                console.log(`[pTS Inspector] Delegated ui-curve event (${e.type}), new value:`, (curveEl as any).value);
+                syncUiCurveToDump(curveEl, _lastDump);
                 if (_currentTriggerAutoSave) _currentTriggerAutoSave();
             }
         };
@@ -1337,9 +1408,22 @@ function findBooleanElement(path: any[]): HTMLElement | null {
     return null;
 }
 
+function findCurveElement(path: any[]): HTMLElement | null {
+    if (!Array.isArray(path)) return null;
+    for (const node of path) {
+        if (!node || !node.tagName) continue;
+        const tag = node.tagName.toUpperCase();
+        if (tag === 'UI-CURVE' || tag === 'UI-SECTION-CURVE' || tag === 'CURVE-EDITOR') return node;
+        if (node.classList && (node.classList.contains('ui-curve') || node.classList.contains('curve-editor'))) return node;
+        const dump = node.dump;
+        if (dump && (dump.type === 'RealCurve' || dump.type === 'cc.RealCurve' || isRealCurve(dump))) return node;
+    }
+    return null;
+}
+
 function isPrimaryInput(path: any[]): boolean {
     if (!Array.isArray(path)) return false;
-    if (findAssetElement(path) || findEnumElement(path) || findBooleanElement(path)) {
+    if (findAssetElement(path) || findEnumElement(path) || findBooleanElement(path) || findCurveElement(path)) {
         return false;
     }
     for (const node of path) {
@@ -1604,10 +1688,9 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
     }
 
     const newAsset = this.assetList[0];
-    if (_currentAsset && _currentAsset.uuid === newAsset.uuid && _lastDump) {
-        console.log("[Inspector] Same asset, skipping re-render.");
-        console.groupEnd();
-        //return;
+    if (_isSaving || (Date.now() - _lastSaveTime < 800 && _currentAsset && _currentAsset.uuid === newAsset.uuid)) {
+        console.log("[pTS Inspector] Asset update triggered by recent internal save, skipping reload/re-render.");
+        return;
     }
 
     _currentAsset = newAsset;
@@ -1725,59 +1808,91 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             return;
         }
         if (!_currentAsset || !_cachedData) return;
-
-        console.groupCollapsed("[pTS Inspector] Saving Asset: ", _currentAsset.displayName);
-        console.log('Collecting values for saving...');
-        
-        // Pre-save sweep: sync all ui-asset elements in DOM into _lastDump
-        const uiAssets = collectAllUiAssets(this.$.view);
-        for (const assetEl of uiAssets) {
-            syncUiAssetToDump(assetEl, _lastDump);
+        if (_isSaving) {
+            console.log('[pTS Inspector] Save already in progress, skipping duplicate save.');
+            return;
         }
 
-        // Pre-save sweep: resolve all asset concrete subtypes
-        if (_lastDump && _lastDump.value) {
-            await resolveAllAssetSubtypes(_lastDump.value);
-        }
+        _isSaving = true;
+        _lastSaveTime = Date.now();
 
-        // Update type if changed in UI
-        if (this.$.ptsa && this.$.ptsa.value) {
-            _cachedData.__type__ = this.$.ptsa.value;
-        }
-
-        // Ensure __value__ exists
-        if (!_cachedData.__value__) {
-            _cachedData.__value__ = {};
-        }
-
-        // Collect values from basic props
-        this.$.view.querySelectorAll('.pts-basic-prop').forEach((el: any) => {
-            const key = el.dataset.key;
-            if (key === 'script') return;
-            const dump = el.dump || (_lastDump?.value && _lastDump.value[key]);
-            if (dump) {
-                const propName = dump.name || key;
-                if (propName === 'script' || propName === '__scriptAsset' || isEditorPropItem(dump, propName, _lastDump?.__editor_props__)) {
-                    return;
-                }
-                const getterInfo = _lastDump?.__getters__?.[propName];
-                if (getterInfo || dump.isGetter || _lastDump?.value?.['_' + propName] !== undefined) {
-                    return;
-                }
-                _cachedData.__value__[propName] = extractDumpValue(dump, _lastDump?.__editor_props__);
+        try {
+            console.groupCollapsed("[pTS Inspector] Saving Asset: ", _currentAsset.displayName);
+            console.log('Collecting values for saving...');
+            
+            // Pre-save sweep: sync all ui-asset elements in DOM into _lastDump
+            const uiAssets = collectAllUiAssets(this.$.view);
+            for (const assetEl of uiAssets) {
+                syncUiAssetToDump(assetEl, _lastDump);
             }
-        });
 
-        // Preserve backing fields (e.g. _bundle) for array items and nested objects
-        if (_cachedData.__value__) {
-            for (const propName of Object.keys(_cachedData.__value__)) {
-                const val = _cachedData.__value__[propName];
-                const dumpItem = _lastDump?.value?.[propName];
-                if (Array.isArray(val) && dumpItem && Array.isArray(dumpItem.value)) {
-                    for (let i = 0; i < val.length; i++) {
-                        const itemVal = val[i]?.__value__ || val[i];
-                        const childDump = dumpItem.value[i];
-                        const dumpItemVal = childDump?.value;
+            // Pre-save sweep: sync all ui-curve elements in DOM into _lastDump
+            const uiCurves = collectAllUiCurves(this.$.view);
+            for (const curveEl of uiCurves) {
+                syncUiCurveToDump(curveEl, _lastDump);
+            }
+
+            // Pre-save sweep: resolve all asset concrete subtypes
+            if (_lastDump && _lastDump.value) {
+                await resolveAllAssetSubtypes(_lastDump.value);
+            }
+
+            // Update type if changed in UI
+            if (this.$.ptsa && this.$.ptsa.value) {
+                _cachedData.__type__ = this.$.ptsa.value;
+            }
+
+            // Ensure __value__ exists
+            if (!_cachedData.__value__) {
+                _cachedData.__value__ = {};
+            }
+
+            // Collect values from basic props
+            this.$.view.querySelectorAll('.pts-basic-prop').forEach((el: any) => {
+                const key = el.dataset.key;
+                if (key === 'script') return;
+                const dump = el.dump || (_lastDump?.value && _lastDump.value[key]);
+                if (dump) {
+                    const propName = dump.name || key;
+                    if (propName === 'script' || propName === '__scriptAsset' || isEditorPropItem(dump, propName, _lastDump?.__editor_props__)) {
+                        return;
+                    }
+                    const getterInfo = _lastDump?.__getters__?.[propName];
+                    if (getterInfo || dump.isGetter || _lastDump?.value?.['_' + propName] !== undefined) {
+                        return;
+                    }
+                    _cachedData.__value__[propName] = extractDumpValue(dump, _lastDump?.__editor_props__);
+                }
+            });
+
+            // Preserve backing fields (e.g. _bundle) for array items and nested objects
+            if (_cachedData.__value__) {
+                for (const propName of Object.keys(_cachedData.__value__)) {
+                    const val = _cachedData.__value__[propName];
+                    const dumpItem = _lastDump?.value?.[propName];
+                    if (Array.isArray(val) && dumpItem && Array.isArray(dumpItem.value)) {
+                        for (let i = 0; i < val.length; i++) {
+                            const itemVal = val[i]?.__value__ || val[i];
+                            const childDump = dumpItem.value[i];
+                            const dumpItemVal = childDump?.value;
+                            if (itemVal && typeof itemVal === 'object' && dumpItemVal && typeof dumpItemVal === 'object') {
+                                for (const k in dumpItemVal) {
+                                    if (k.startsWith('_') && (itemVal[k] === undefined || itemVal[k] === '')) {
+                                        if (dumpItemVal[k].value !== undefined && dumpItemVal[k].value !== '') {
+                                            itemVal[k] = dumpItemVal[k].value;
+                                        } else {
+                                            const publicProp = k.slice(1);
+                                            if (itemVal[publicProp] !== undefined && itemVal[publicProp] !== '') {
+                                                itemVal[k] = itemVal[publicProp];
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else if (val && typeof val === 'object' && dumpItem && dumpItem.value && typeof dumpItem.value === 'object') {
+                        const itemVal = val.__value__ || val;
+                        const dumpItemVal = dumpItem.value;
                         if (itemVal && typeof itemVal === 'object' && dumpItemVal && typeof dumpItemVal === 'object') {
                             for (const k in dumpItemVal) {
                                 if (k.startsWith('_') && (itemVal[k] === undefined || itemVal[k] === '')) {
@@ -1793,121 +1908,115 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                             }
                         }
                     }
-                } else if (val && typeof val === 'object' && dumpItem && dumpItem.value && typeof dumpItem.value === 'object') {
-                    const itemVal = val.__value__ || val;
-                    const dumpItemVal = dumpItem.value;
-                    if (itemVal && typeof itemVal === 'object' && dumpItemVal && typeof dumpItemVal === 'object') {
-                        for (const k in dumpItemVal) {
-                            if (k.startsWith('_') && (itemVal[k] === undefined || itemVal[k] === '')) {
-                                if (dumpItemVal[k].value !== undefined && dumpItemVal[k].value !== '') {
-                                    itemVal[k] = dumpItemVal[k].value;
-                                } else {
-                                    const publicProp = k.slice(1);
-                                    if (itemVal[publicProp] !== undefined && itemVal[publicProp] !== '') {
-                                        itemVal[k] = itemVal[publicProp];
-                                    }
-                                }
+                }
+            }
+
+            // Preserve any properties from _lastDump.value not captured in DOM (excluding readonly getters and editor props)
+            if (_lastDump && _lastDump.value) {
+                for (const key of Object.keys(_lastDump.value)) {
+                    if (_ignores.includes(key)) continue;
+                    const item = _lastDump.value[key];
+                    if (isEditorPropItem(item, key, _lastDump.__editor_props__)) continue;
+                    const getterInfo = _lastDump?.__getters__?.[key];
+                    if (getterInfo || item.isGetter || _lastDump?.value?.['_' + key] !== undefined) continue;
+                    if (!(_cachedData.__value__.hasOwnProperty(key))) {
+                        _cachedData.__value__[key] = extractDumpValue(item, _lastDump.__editor_props__);
+                    }
+                }
+            }
+
+            // Preserve any backing fields (e.g. _bundle) from _cachedData.__value__
+            if (_cachedData.__value__) {
+                for (const k in _cachedData.__value__) {
+                    if (_ignores.includes(k) || k.startsWith('__')) {
+                        delete _cachedData.__value__[k];
+                        continue;
+                    }
+                    if (k.startsWith('_') && _cachedData.__value__[k] !== undefined && _cachedData.__value__[k] !== '') {
+                        if (_lastDump?.value?.[k]?.value === undefined || _lastDump?.value?.[k]?.value === '') {
+                            if (_lastDump?.value?.[k]) {
+                                _lastDump.value[k].value = _cachedData.__value__[k];
                             }
                         }
                     }
                 }
             }
-        }
 
-        // Preserve any properties from _lastDump.value not captured in DOM (excluding readonly getters and editor props)
-        if (_lastDump && _lastDump.value) {
-            for (const key of Object.keys(_lastDump.value)) {
-                if (_ignores.includes(key)) continue;
-                const item = _lastDump.value[key];
-                if (isEditorPropItem(item, key, _lastDump.__editor_props__)) continue;
-                const getterInfo = _lastDump?.__getters__?.[key];
-                if (getterInfo || item.isGetter || _lastDump?.value?.['_' + key] !== undefined) continue;
-                if (!(_cachedData.__value__.hasOwnProperty(key))) {
-                    _cachedData.__value__[key] = extractDumpValue(item, _lastDump.__editor_props__);
+            // Strip any getters that may have been previously saved in __value__
+            if (_lastDump && _lastDump.__getters__) {
+                for (const g in _lastDump.__getters__) {
+                    delete _cachedData.__value__[g];
                 }
             }
-        }
 
-        // Preserve any backing fields (e.g. _bundle) from _cachedData.__value__
-        if (_cachedData.__value__) {
-            for (const k in _cachedData.__value__) {
-                if (_ignores.includes(k) || k.startsWith('__')) {
-                    delete _cachedData.__value__[k];
-                    continue;
+            // Strip any internal engine, lifecycle, ignored, getter, or editor_property debug fields from __value__
+            if (_cachedData && _cachedData.__value__) {
+                for (const k of Object.keys(_cachedData.__value__)) {
+                    const item = _lastDump?.value?.[k];
+                    if (_ignores.includes(k) || k.startsWith('__')) {
+                        delete _cachedData.__value__[k];
+                        continue;
+                    }
+                    if (isEditorPropItem(item, k, _lastDump?.__editor_props__)) {
+                        delete _cachedData.__value__[k];
+                        continue;
+                    }
+                    if (_lastDump?.__getters__?.[k] || item?.isGetter || _lastDump?.value?.['_' + k] !== undefined) {
+                        delete _cachedData.__value__[k];
+                    }
                 }
-                if (k.startsWith('_') && _cachedData.__value__[k] !== undefined && _cachedData.__value__[k] !== '') {
-                    if (_lastDump?.value?.[k]?.value === undefined || _lastDump?.value?.[k]?.value === '') {
-                        if (_lastDump?.value?.[k]) {
-                            _lastDump.value[k].value = _cachedData.__value__[k];
+            }
+
+            console.log('Final data to save:', _cachedData);
+            const content = JSON.stringify(_cachedData, null, 4);
+            try {
+                await Editor.Message.request('asset-db', 'save-asset', _currentAsset.uuid, content);
+                console.log('Asset saved successfully:', _currentAsset.displayName);
+                if (this.$.jsonDisplay) {
+                    this.$.jsonDisplay.textContent = content;
+                }
+            } catch (err) {
+                console.error('Failed to save asset:', err);
+            }
+
+            // Extract and save dependencies to meta
+            try {
+                const depends = extractAssetDependencies(_cachedData);
+                const meta = await Editor.Message.request('asset-db', 'query-asset-meta', _currentAsset.uuid);
+                if (meta) {
+                    meta.userData = meta.userData || {};
+                    meta.userData.__type__ = _cachedData.__type__;
+                    meta.userData.__depends__ = depends;
+                    delete meta.userData.depends;
+                    if (this.$.lazyToggle) {
+                        const isL = !!(this.$.lazyToggle.value || this.$.lazyToggle.checked);
+                        meta.userData.isLazy = isL;
+                        if (this.$.forceLazyToggle) {
+                            const isF = isL && !!(this.$.forceLazyToggle.value || this.$.forceLazyToggle.checked);
+                            meta.userData.isForceLazy = isF;
+                            meta.userData.forceLazy = isF;
                         }
                     }
+                    await Editor.Message.request('asset-db', 'save-asset-meta', _currentAsset.uuid, JSON.stringify(meta));
+                    console.log(`[pTS Inspector] Saved meta with __depends__:`, depends);
                 }
+            } catch (err) {
+                console.error('[pTS Inspector] Failed to save meta dependencies:', err);
             }
-        }
 
-        // Strip any getters that may have been previously saved in __value__
-        if (_lastDump && _lastDump.__getters__) {
-            for (const g in _lastDump.__getters__) {
-                delete _cachedData.__value__[g];
+            // Re-scan & update _lazy.prefab immediately after writing to disk
+            try {
+                const report = await Editor.Message.request('pts-asset', 'sync-lazy-prefab');
+                console.log('[pTS Inspector] Re-scanned and synced _lazy.prefab after save:', report);
+            } catch (e) {
+                console.error('[pTS Inspector] Failed to sync lazy prefab after save:', e);
             }
+        } finally {
+            console.groupEnd();
+            setTimeout(() => {
+                _isSaving = false;
+            }, 300);
         }
-
-        // Strip any internal engine, lifecycle, ignored, getter, or editor_property debug fields from __value__
-        if (_cachedData && _cachedData.__value__) {
-            for (const k of Object.keys(_cachedData.__value__)) {
-                const item = _lastDump?.value?.[k];
-                if (_ignores.includes(k) || k.startsWith('__') || isEditorPropItem(item, k, _lastDump?.__editor_props__) || _lastDump?.__getters__?.[k] || item?.isGetter || _lastDump?.value?.['_' + k] !== undefined) {
-                    delete _cachedData.__value__[k];
-                }
-            }
-        }
-
-        console.log('Final data to save:', _cachedData);
-        const content = JSON.stringify(_cachedData, null, 4);
-        try {
-            await Editor.Message.request('asset-db', 'save-asset', _currentAsset.uuid, content);
-            console.log('Asset saved successfully:', _currentAsset.displayName);
-            if (this.$.jsonDisplay) {
-                this.$.jsonDisplay.textContent = content;
-            }
-        } catch (err) {
-            console.error('Failed to save asset:', err);
-        }
-
-        // Extract and save dependencies to meta
-        try {
-            const depends = extractAssetDependencies(_cachedData);
-            const meta = await Editor.Message.request('asset-db', 'query-asset-meta', _currentAsset.uuid);
-            if (meta) {
-                meta.userData = meta.userData || {};
-                meta.userData.__type__ = _cachedData.__type__;
-                meta.userData.__depends__ = depends;
-                delete meta.userData.depends;
-                if (this.$.lazyToggle) {
-                    const isL = !!(this.$.lazyToggle.value || this.$.lazyToggle.checked);
-                    meta.userData.isLazy = isL;
-                    if (this.$.forceLazyToggle) {
-                        const isF = isL && !!(this.$.forceLazyToggle.value || this.$.forceLazyToggle.checked);
-                        meta.userData.isForceLazy = isF;
-                        meta.userData.forceLazy = isF;
-                    }
-                }
-                await Editor.Message.request('asset-db', 'save-asset-meta', _currentAsset.uuid, JSON.stringify(meta));
-                console.log(`[pTS Inspector] Saved meta with __depends__:`, depends);
-            }
-        } catch (err) {
-            console.error('[pTS Inspector] Failed to save meta dependencies:', err);
-        }
-
-        // Re-scan & update _lazy.prefab immediately after writing to disk
-        try {
-            const report = await Editor.Message.request('pts-asset', 'sync-lazy-prefab');
-            console.log('[pTS Inspector] Re-scanned and synced _lazy.prefab after save:', report);
-        } catch (e) {
-            console.error('[pTS Inspector] Failed to sync lazy prefab after save:', e);
-        }
-
-        console.groupEnd();
     };
 
     let _autoSaveTimer: any = null;
@@ -1921,7 +2030,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             if (_autoSaveTimer) clearTimeout(_autoSaveTimer);
             _autoSaveTimer = setTimeout(async () => {
                 await saveAsset();
-            }, 80);
+            }, 300);
         } catch (e) {
             console.error('[pTS Inspector] AutoSave error:', e);
         }
@@ -1948,8 +2057,15 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 const boolEl = findBooleanElement(path);
                 if (boolEl) {
                     newValue = (boolEl as any).value !== undefined ? (boolEl as any).value : (boolEl as any).checked;
-                } else if ('value' in target) {
-                    newValue = (target as any).value;
+                } else {
+                    const curveEl = findCurveElement(path);
+                    if (curveEl) {
+                        const uiCurve = (curveEl.tagName === 'UI-CURVE' ? curveEl : curveEl.querySelector('ui-curve')) as HTMLElement || curveEl;
+                        const cVal = (uiCurve as any).value || (curveEl as any).dump?.value;
+                        newValue = normalizeCurveValue(cVal);
+                    } else if ('value' in target) {
+                        newValue = (target as any).value;
+                    }
                 }
             }
         }
@@ -1987,6 +2103,15 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                     return { propPath: dump.path, newValue: extractDumpValue(dump) };
                 }
 
+                if (isRealCurve(dump)) {
+                    if (newValue !== undefined) {
+                        newValue = normalizeCurveValue(newValue);
+                    } else if (dump.value !== undefined) {
+                        newValue = normalizeCurveValue(dump.value);
+                    }
+                    return { propPath: dump.path, newValue };
+                }
+
                 if (newValue === undefined && dump.value !== undefined) {
                     newValue = dump.value;
                 }
@@ -1997,6 +2122,10 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         // 2. Check basic prop container
         const basicProp = target.closest('.pts-basic-prop') as HTMLElement;
         if (basicProp && basicProp.dataset.key) {
+            const propDump = _lastDump?.value?.[basicProp.dataset.key];
+            if (propDump && isRealCurve(propDump)) {
+                newValue = normalizeCurveValue(newValue !== undefined ? newValue : propDump.value);
+            }
             return { propPath: basicProp.dataset.key, newValue };
         }
 
@@ -2036,6 +2165,8 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 if (targetDump.isArray) {
                     populateDumpWithSaved(targetDump, newValue);
                     translateDump(targetDump.value, propPath);
+                } else if (isRealCurve(targetDump)) {
+                    targetDump.value = normalizeCurveValue(newValue);
                 } else if (isEnumType(targetDump)) {
                     targetDump.value = (newValue && typeof newValue === 'object' && 'uuid' in newValue) ? newValue.uuid : newValue;
                 } else if (isAssetType(targetDump)) {
@@ -2055,6 +2186,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 topPropEl.dump = topDump;
                 topPropEl.render(topDump);
                 bindUiAssetEvents(topPropEl, () => {});
+                bindUiCurveEvents(topPropEl, () => {});
             }
 
             const info = {
@@ -2096,6 +2228,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                                 topPropEl.dump = topDump;
                                 topPropEl.render(topDump);
                                 bindUiAssetEvents(topPropEl, () => {});
+                                bindUiCurveEvents(topPropEl, () => {});
                             }
                         }
                     }
@@ -2123,6 +2256,8 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             if (targetDump.isArray) {
                 populateDumpWithSaved(targetDump, newValue);
                 translateDump(targetDump.value, propPath);
+            } else if (isRealCurve(targetDump)) {
+                targetDump.value = normalizeCurveValue(newValue);
             } else if (isEnumType(targetDump)) {
                 targetDump.value = (newValue && typeof newValue === 'object' && 'uuid' in newValue) ? newValue.uuid : newValue;
             } else if (isAssetType(targetDump)) {
@@ -2228,6 +2363,9 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 bindUiAssetEvents(topPropEl, () => {
                     if (_currentTriggerAutoSave) _currentTriggerAutoSave();
                 });
+                bindUiCurveEvents(topPropEl, () => {
+                    if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                });
             }
 
             // 6. Update visibility
@@ -2297,6 +2435,21 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 return;
             }
 
+            // Curve change: apply change immediately
+            const curveEl = findCurveElement(path);
+            if (curveEl) {
+                console.log(`[pTS Inspector] Curve change detected on <${curveEl.tagName}>`);
+                const uiCurve = (curveEl.tagName === 'UI-CURVE' ? curveEl : curveEl.querySelector('ui-curve')) as HTMLElement || curveEl;
+                syncUiCurveToDump(uiCurve, _lastDump);
+                const changeInfo = resolveChangeFromEvent(e);
+                if (changeInfo) {
+                    await applyPropertyChange(panel, changeInfo.propPath, changeInfo.newValue);
+                } else if (_currentTriggerAutoSave) {
+                    _currentTriggerAutoSave();
+                }
+                return;
+            }
+
             // Primary property (cc-prop / ui-input / ui-num-input):
             // Rule: "if the target value changed is primary ( cc-prop ), then only save if user hit enter"
             if (isPrimaryInput(path)) {
@@ -2327,6 +2480,12 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 syncUiAssetToDump(uiAsset, _lastDump);
             }
 
+            const curveEl = findCurveElement(path);
+            if (curveEl) {
+                const uiCurve = (curveEl.tagName === 'UI-CURVE' ? curveEl : curveEl.querySelector('ui-curve')) as HTMLElement || curveEl;
+                syncUiCurveToDump(uiCurve, _lastDump);
+            }
+
             console.log(`[pTS Inspector] Confirm event (Enter/select) -> triggering change.`);
             const changeInfo = resolveChangeFromEvent(e);
             if (changeInfo) {
@@ -2352,6 +2511,12 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                     syncUiAssetToDump(uiAsset, _lastDump);
                 }
 
+                const curveEl = findCurveElement(path);
+                if (curveEl) {
+                    const uiCurve = (curveEl.tagName === 'UI-CURVE' ? curveEl : curveEl.querySelector('ui-curve')) as HTMLElement || curveEl;
+                    syncUiCurveToDump(uiCurve, _lastDump);
+                }
+
                 console.log(`[pTS Inspector] Enter key hit on primary field -> triggering change.`);
                 const changeInfo = resolveChangeFromEvent(e);
                 if (changeInfo) {
@@ -2372,6 +2537,11 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 if (assetEl) {
                     const uiAsset = (assetEl.tagName === 'UI-ASSET' ? assetEl : assetEl.querySelector('ui-asset')) as HTMLElement || assetEl;
                     syncUiAssetToDump(uiAsset, _lastDump);
+                }
+                const curveEl = findCurveElement(path);
+                if (curveEl) {
+                    const uiCurve = (curveEl.tagName === 'UI-CURVE' ? curveEl : curveEl.querySelector('ui-curve')) as HTMLElement || curveEl;
+                    syncUiCurveToDump(uiCurve, _lastDump);
                 }
                 const changeInfo = resolveChangeFromEvent(e);
                 if (changeInfo) {

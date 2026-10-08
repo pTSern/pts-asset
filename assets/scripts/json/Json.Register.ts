@@ -481,7 +481,37 @@ function _resolveRealCurve(data: any): RealCurve {
             });
         }
     } 
-    // 2. If _times and _values arrays are present
+    // 2. If keys array is present (from ui-curve format)
+    else if (Array.isArray(raw.keys)) {
+        const sorted = [...raw.keys].sort((a, b) => {
+            const tA = typeof a.time === 'number' ? a.time : (a.point && typeof a.point.x === 'number' ? a.point.x : 0);
+            const tB = typeof b.time === 'number' ? b.time : (b.point && typeof b.point.x === 'number' ? b.point.x : 0);
+            return tA - tB;
+        });
+        for (const k of sorted) {
+            const time = typeof k.time === 'number' ? k.time : (k.point && typeof k.point.x === 'number' ? k.point.x : 0);
+            const value = typeof k.value === 'number' ? k.value : (k.point && typeof k.point.y === 'number' ? k.point.y : 0);
+            const leftTangent = typeof k.leftTangent === 'number' ? k.leftTangent : (typeof k.inTangent === 'number' ? k.inTangent : 0);
+            const rightTangent = typeof k.rightTangent === 'number' ? k.rightTangent : (typeof k.outTangent === 'number' ? k.outTangent : 0);
+            const leftTangentWeight = typeof k.leftTangentWeight === 'number' ? k.leftTangentWeight : (typeof k.inTangentWeight === 'number' ? k.inTangentWeight : 1);
+            const rightTangentWeight = typeof k.rightTangentWeight === 'number' ? k.rightTangentWeight : (typeof k.outTangentWeight === 'number' ? k.outTangentWeight : 1);
+            const interpolationMode = typeof k.interpolationMode === 'number' ? k.interpolationMode : (typeof k.interpMode === 'number' ? k.interpMode : 0);
+            const tangentWeightMode = typeof k.tangentWeightMode === 'number' ? k.tangentWeightMode : 0;
+            const easingMethod = typeof k.easingMethod === 'number' ? k.easingMethod : 0;
+
+            curve.addKeyFrame(time, {
+                value,
+                leftTangent,
+                rightTangent,
+                leftTangentWeight,
+                rightTangentWeight,
+                interpolationMode,
+                tangentWeightMode,
+                easingMethod
+            });
+        }
+    }
+    // 3. If _times and _values arrays are present
     else if (Array.isArray(raw._times) && Array.isArray(raw._values)) {
         for (let i = 0; i < raw._times.length; i++) {
             const time = raw._times[i];
@@ -501,14 +531,22 @@ function _resolveRealCurve(data: any): RealCurve {
 
     const preExtrap = typeof raw.preExtrapolation === 'number'
         ? raw.preExtrapolation
-        : (typeof raw.preExtrapolation?.value === 'number' ? raw.preExtrapolation.value : undefined);
+        : (typeof raw.preExtrap === 'number'
+            ? raw.preExtrap
+            : (typeof raw.preWrapMode === 'number'
+                ? raw.preWrapMode
+                : (typeof raw.preExtrapolation?.value === 'number' ? raw.preExtrapolation.value : undefined)));
     if (typeof preExtrap === 'number') {
         curve.preExtrapolation = preExtrap;
     }
 
     const postExtrap = typeof raw.postExtrapolation === 'number'
         ? raw.postExtrapolation
-        : (typeof raw.postExtrapolation?.value === 'number' ? raw.postExtrapolation.value : undefined);
+        : (typeof raw.postExtrap === 'number'
+            ? raw.postExtrap
+            : (typeof raw.postWrapMode === 'number'
+                ? raw.postWrapMode
+                : (typeof raw.postExtrapolation?.value === 'number' ? raw.postExtrapolation.value : undefined)));
     if (typeof postExtrap === 'number') {
         curve.postExtrapolation = postExtrap;
     }
