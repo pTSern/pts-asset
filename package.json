@@ -24,7 +24,7 @@
     },
     "panels": {
         "default": {
-            "title": "pTS Asset",
+            "title": "pTS-Asset",
             "type": "dockable",
             "main": "dist/panel.js",
             "flags": {
@@ -103,32 +103,22 @@
         },
         "menu": [
             {
-                "path": "i18n:menu.extension/pTS Asset",
+                "path": "i18n:menu.extension/pTS-Asset",
                 "label": "Open Panel",
                 "message": "open-panel"
             },
             {
-                "path": "i18n:menu.extension/pTS Asset",
+                "path": "i18n:menu.extension/pTS-Asset",
                 "label": "Reload",
                 "message": "reload"
             },
             {
-                "path": "i18n:menu.extension/pTS Asset",
-                "label": "Create",
-                "message": "createz"
-            },
-            {
-                "path": "i18n:menu.extension/pTS Asset",
-                "label": "Log",
-                "message": "_cc:log"
-            },
-            {
-                "path": "i18n:menu.extension/pTS Asset",
+                "path": "i18n:menu.extension/pTS-Asset",
                 "label": "Update .pts Assets",
                 "message": "pts::importer::lookup"
             },
             {
-                "path": "i18n:menu.extension/pTS Asset",
+                "path": "i18n:menu.extension/pTS-Asset",
                 "label": "Re-Scan & Sync Lazy Prefab",
                 "message": "sync-lazy-prefab"
             }
