@@ -130,6 +130,36 @@ ui-section.pts-group-section > ui-label[slot="header"] {
 .tab-content.active {
     display: block;
 }
+
+@keyframes pts-save-dirty-pulse {
+    0% {
+        box-shadow: 0 0 0 0 rgba(255, 140, 0, 0.7);
+        filter: brightness(1);
+    }
+    50% {
+        box-shadow: 0 0 14px 4px rgba(255, 152, 0, 0.95);
+        filter: brightness(1.15);
+    }
+    100% {
+        box-shadow: 0 0 0 0 rgba(255, 140, 0, 0.7);
+        filter: brightness(1);
+    }
+}
+
+#save-button.dirty {
+    animation: pts-save-dirty-pulse 1.3s infinite ease-in-out !important;
+    border: 1px solid #ff9800 !important;
+    color: #ffffff !important;
+    font-weight: bold !important;
+    letter-spacing: 0.3px;
+    position: relative;
+    transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+#save-button.dirty:hover {
+    filter: brightness(1.25) !important;
+    box-shadow: 0 0 16px 5px rgba(255, 152, 0, 1) !important;
+}
 `;
 
 export const template = `
@@ -153,6 +183,36 @@ export const template = `
         }
         .tab-content.active {
             display: block;
+        }
+
+        @keyframes pts-save-dirty-pulse {
+            0% {
+                box-shadow: 0 0 0 0 rgba(255, 140, 0, 0.7);
+                filter: brightness(1);
+            }
+            50% {
+                box-shadow: 0 0 14px 4px rgba(255, 152, 0, 0.95);
+                filter: brightness(1.15);
+            }
+            100% {
+                box-shadow: 0 0 0 0 rgba(255, 140, 0, 0.7);
+                filter: brightness(1);
+            }
+        }
+
+        #save-button.dirty {
+            animation: pts-save-dirty-pulse 1.3s infinite ease-in-out !important;
+            border: 1px solid #ff9800 !important;
+            color: #ffffff !important;
+            font-weight: bold !important;
+            letter-spacing: 0.3px;
+            position: relative;
+            transition: background 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        #save-button.dirty:hover {
+            filter: brightness(1.25) !important;
+            box-shadow: 0 0 16px 5px rgba(255, 152, 0, 1) !important;
         }
     </style>
     <div id="preview-banner" style="display: none; align-items: center; justify-content: space-between; padding: 6px 12px; background: #2e7d32; color: #fff; font-weight: bold; font-size: 12px; border-bottom: 1px solid #4caf50; z-index: 11;">
@@ -195,6 +255,33 @@ let _lastForceLazyState: boolean | null = null;
 let _isInLivePreviewMode = false;
 let _previewPollTimer: any = null;
 let _livePreviewValues: Record<string, any> | null = null;
+let _currentPanel: PanelThis | null = null;
+let _isDirty = false;
+
+function setSaveButtonDirtyState(isDirty: boolean, panel?: PanelThis | null) {
+    _isDirty = isDirty;
+    const p = panel || _currentPanel;
+    if (!p || !p.$.save) return;
+    if (_isInLivePreviewMode) {
+        p.$.save.classList.remove('dirty');
+        p.$.save.classList.remove('orange');
+        p.$.save.classList.add('blue');
+        return;
+    }
+
+    if (isDirty) {
+        p.$.save.classList.remove('blue');
+        p.$.save.classList.add('orange', 'dirty');
+        p.$.save.textContent = '💾 Save Changes *';
+        p.$.save.title = '⚠️ Unsaved changes! Auto-save is disabled. Click here to save changes to disk (.pts file).';
+    } else {
+        p.$.save.classList.remove('dirty');
+        p.$.save.classList.remove('orange');
+        p.$.save.classList.add('blue');
+        p.$.save.textContent = 'Save Changes';
+        p.$.save.title = 'Save changes to disk (.pts file)';
+    }
+}
 
 function setPreviewModeUI(panel: PanelThis, isPreview: boolean, foundInstance: boolean) {
     _isInLivePreviewMode = isPreview;
@@ -226,13 +313,19 @@ function setPreviewModeUI(panel: PanelThis, isPreview: boolean, foundInstance: b
             panel.$.save.style.cursor = 'not-allowed';
             panel.$.save.textContent = '⚡ Live Preview (In-Memory Only)';
             panel.$.save.title = 'Disk saving is disabled in Live Preview Mode (edits apply directly to runtime memory without altering disk files)';
+            panel.$.save.classList.remove('dirty');
+            panel.$.save.classList.remove('orange');
+            panel.$.save.classList.add('blue');
         } else {
             panel.$.save.removeAttribute('disabled');
             panel.$.save.disabled = false;
             panel.$.save.style.opacity = '1';
             panel.$.save.style.cursor = 'pointer';
-            panel.$.save.textContent = 'Save Changes';
-            panel.$.save.title = 'Save changes to disk (.pts file)';
+            if (_isDirty) {
+                setSaveButtonDirtyState(true, panel);
+            } else {
+                setSaveButtonDirtyState(false, panel);
+            }
         }
     }
     if (panel.$.fix) {
@@ -1660,6 +1753,7 @@ function stopInspectorTicking() {
 
 export async function update(this: PanelThis, assetList: AssetInfo[], metaList: Meta[]) {
     const panel = this;
+    _currentPanel = this;
     this.assetList = assetList;
     this.metaList = metaList;
 
@@ -1694,6 +1788,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
     }
 
     _currentAsset = newAsset;
+    setSaveButtonDirtyState(false, this);
     const _fileContent = fs.readFileSync(_currentAsset.file, { encoding: 'utf8' });
     _cachedData = JSON.parse(_fileContent);
     if (_cachedData && _cachedData.__value__ && typeof _cachedData.__value__ === 'object') {
@@ -1972,6 +2067,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             try {
                 await Editor.Message.request('asset-db', 'save-asset', _currentAsset.uuid, content);
                 console.log('Asset saved successfully:', _currentAsset.displayName);
+                setSaveButtonDirtyState(false, panel);
                 if (this.$.jsonDisplay) {
                     this.$.jsonDisplay.textContent = content;
                 }
@@ -2025,8 +2121,12 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         try {
             const profile = await Editor.Profile.getProject('pts-asset') as any || {};
             const isAutoSave = typeof profile.isAutoSave === 'boolean' ? profile.isAutoSave : true;
-            if (!isAutoSave) return;
+            if (!isAutoSave) {
+                setSaveButtonDirtyState(true, panel);
+                return;
+            }
 
+            setSaveButtonDirtyState(false, panel);
             if (_autoSaveTimer) clearTimeout(_autoSaveTimer);
             _autoSaveTimer = setTimeout(async () => {
                 await saveAsset();
@@ -2502,6 +2602,12 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         // 3. KEYDOWN event:
         // Ensures Enter keypress triggers save for primary inputs even before blur
         this.$.view.addEventListener('keydown', async (e: KeyboardEvent) => {
+            if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
+                e.preventDefault();
+                e.stopPropagation();
+                panel.$.save?.click();
+                return;
+            }
             if (e.key === 'Enter') {
                 const path = e.composedPath ? e.composedPath() : [e.target];
 
@@ -2574,19 +2680,29 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
 
     this.$.save.onclick = async () => {
         if (_autoSaveTimer) clearTimeout(_autoSaveTimer);
-        const origText = this.$.save.textContent;
         try {
             this.$.save.textContent = 'Saving & Syncing...';
             await saveAsset();
+            setSaveButtonDirtyState(false, panel);
             this.$.save.textContent = 'Saved & Synced! ✔';
             setTimeout(() => {
                 if (!_isInLivePreviewMode && this.$.save) {
-                    this.$.save.textContent = origText || 'Save Changes';
+                    if (_isDirty) {
+                        setSaveButtonDirtyState(true, panel);
+                    } else {
+                        setSaveButtonDirtyState(false, panel);
+                    }
                 }
             }, 1200);
         } catch (err) {
             console.error('[pTS Inspector] Error during save & sync:', err);
-            if (this.$.save) this.$.save.textContent = origText || 'Save Changes';
+            if (this.$.save) {
+                if (_isDirty) {
+                    setSaveButtonDirtyState(true, panel);
+                } else {
+                    setSaveButtonDirtyState(false, panel);
+                }
+            }
         }
     };
 
@@ -2666,6 +2782,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         try {
             await Editor.Message.request('asset-db', 'save-asset', _currentAsset.uuid, ptsContent);
             console.log('[pTS Inspector] Fixed .pts content saved successfully');
+            setSaveButtonDirtyState(false, panel);
         } catch (err) {
             console.error('[pTS Inspector] Failed to save fixed .pts asset:', err);
         }
@@ -2772,6 +2889,8 @@ export function ready(this: PanelThis) {
 export function close(this: PanelThis) {
     stopPreviewPolling();
     stopInspectorTicking();
+    _currentPanel = null;
+    _isDirty = false;
     _isInLivePreviewMode = false;
     _currentAsset = null;
     _cachedData = null;
