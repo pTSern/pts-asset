@@ -4,3 +4,5 @@ dist/
 Thumbs.db
 *.log
 .agents/
+assets/_$secret
+assets/_$secret.meta
