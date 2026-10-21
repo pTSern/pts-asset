@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { getClassesInTsFile, isSubclassOrSame, scanInheritance } from './inheritance';
+import { getClassesInTsFile, isSubclassOrSame, scanInheritance, scanSingleFile } from './inheritance';
 import { rescanAndSyncLazyPrefab } from './lazy-registry';
 
 declare const Editor: any;
@@ -949,6 +949,21 @@ export async function fixSinglePtsAsset(ptsFilePath: string): Promise<FixResult>
     };
 }
 
+let _cachedPtsFileList: string[] | null = null;
+
+export function invalidatePtsFileListCache(): void {
+    _cachedPtsFileList = null;
+}
+
+export function getAllPtsFilesOnDisk(): string[] {
+    if (!_cachedPtsFileList) {
+        const projectPath = getProjectPath();
+        const assetsDir = path.join(projectPath, 'assets');
+        _cachedPtsFileList = findFilesByExt(assetsDir, '.pts');
+    }
+    return _cachedPtsFileList;
+}
+
 /**
  * When a TypeScript script changes, find all .pts assets that are instances of classes
  * declared in that script (or subclasses inheriting from them), and apply fix to all of them.
@@ -961,12 +976,10 @@ export async function fixPtsAssetsForScript(tsFilePath: string): Promise<{ affec
 
     console.log(`[pts-fixer] Script changed (${path.basename(tsFilePath)}), declared classes:`, declaredClasses);
 
-    // Refresh inheritance tree
-    scanInheritance(true);
+    // Refresh inheritance tree for this modified script only
+    scanSingleFile(tsFilePath);
 
-    const projectPath = getProjectPath();
-    const assetsDir = path.join(projectPath, 'assets');
-    const allPtsFiles = findFilesByExt(assetsDir, '.pts');
+    const allPtsFiles = getAllPtsFilesOnDisk();
 
     const affectedFiles: string[] = [];
     for (const ptsFile of allPtsFiles) {
