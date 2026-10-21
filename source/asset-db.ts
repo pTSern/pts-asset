@@ -119,8 +119,11 @@ function _isPtsUuid(uuid: string): boolean {
     return false;
 }
 
+let _cachedAssetDbPtsClasses: Set<string> | null = null;
+
 function _enrichInfo(info: any) {
     if (!info) return;
+    if (info.__pts_enriched__) return;
     const file = info.file || info.path;
     if (!file || typeof file !== 'string' || !file.endsWith('.pts')) return;
 
@@ -146,10 +149,12 @@ function _enrichInfo(info: any) {
             const existing = Array.isArray(info.depends) ? info.depends : [];
             info.depends = Array.from(new Set([...existing, ...typeInfo.depends]));
         }
+        info.__pts_enriched__ = true;
     }
 }
 
 function _getAllPtsClasses(): Set<string> {
+    if (_cachedAssetDbPtsClasses) return _cachedAssetDbPtsClasses;
     const classes = new Set<string>();
     classes.add('pts');
 
@@ -186,6 +191,7 @@ function _getAllPtsClasses(): Set<string> {
         for (const d of searchDirs) scan(d);
     } catch {}
 
+    _cachedAssetDbPtsClasses = classes;
     return classes;
 }
 
@@ -352,6 +358,7 @@ export function unload() {
     console.log('[pts-asset:asset-db] Unloaded asset-db worker hooks');
     _restoreHooks();
     _ptsTypeCache.clear();
+    _cachedAssetDbPtsClasses = null;
     clearInheritanceCache();
     _installed = false;
 }
@@ -367,6 +374,7 @@ export const methods = {
             _ptsTypeCache.delete(uuidOrPath);
         } else {
             _ptsTypeCache.clear();
+            _cachedAssetDbPtsClasses = null;
         }
         clearInheritanceCache();
         return true;

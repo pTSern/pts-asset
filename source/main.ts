@@ -130,11 +130,12 @@ export const methods: { [key: string]: (...any: any) => any } = {
     async reload() {
         console.log('[pts-asset] Reloading extension cache and hooks...');
         _ptsTypeCache.clear();
+        _cachedPtsClasses = null;
         _installIpcHook();
         _hookAssetDbRequireCache();
         _installMessageHook();
         try {
-            _getAllPtsClasses();
+            _warmupPtsIndex(true);
         } catch {}
     },
     async onSelectionSelect(type: string, uuid: string) {
@@ -162,12 +163,11 @@ export const methods: { [key: string]: (...any: any) => any } = {
 
     /**
      * Called when Cocos Creator finishes compiling scripts and the scene VM is ready.
-     * Refreshes runtime inheritance chains and clears all caches.
+     * Refreshes runtime inheritance chains.
      */
     async onSceneReady() {
-        console.log('[pts-asset] Scene ready: refreshing inheritance chains and clearing cache');
+        console.log('[pts-asset] Scene ready: refreshing inheritance chains...');
         clearInheritanceCache();
-        _ptsTypeCache.clear();
         try {
             const chains = await Editor.Message.request('scene', 'execute-scene-script', {
                 name: 'pts-core',
@@ -199,7 +199,7 @@ export const methods: { [key: string]: (...any: any) => any } = {
             if (data.file && data.file.endsWith('.ts') && !data.file.endsWith('.d.ts')) {
                 console.log(`[pts-asset] TypeScript asset changed (${data.file}), refreshing inheritance...`);
                 scanSingleFile(data.file);
-                _ptsTypeCache.clear();
+                clearInheritanceCache();
                 try {
                     Editor.Message.request('scene', 'execute-scene-script', {
                         name: 'pts-core',
@@ -221,6 +221,11 @@ export const methods: { [key: string]: (...any: any) => any } = {
             // Only process .pts files
             if (!data.file || !data.file.endsWith('.pts')) return;
 
+            // Invalidate and re-index only this .pts file
+            _ptsTypeCache.delete(uuid);
+            if (data.file) _ptsTypeCache.delete(data.file);
+            _indexSinglePtsFile(data.file, uuid);
+
             const meta = await Editor.Message.request('asset-db', 'query-asset-meta', uuid);
             if (!meta) return;
 
@@ -228,6 +233,11 @@ export const methods: { [key: string]: (...any: any) => any } = {
         } catch (e) {
             // Silently ignore — asset might not be a .pts file
         }
+    },
+
+    async onAssetDeleted(uuid: string) {
+        if (!uuid) return;
+        _removeSinglePtsFile(uuid);
     },
 
     syncPreviewData(data: Record<string, any>) {
@@ -564,15 +574,178 @@ export function invalidatePtsCache(key?: string): void {
 
 const _ptsUuids = new Set<string>();
 
+interface PtsIndexItem {
+    uuid: string;
+    path: string;
+    file: string;
+    url: string;
+    name: string;
+    displayName: string;
+    type: string;
+    ccType: string;
+    importer: string;
+    extends: string[];
+    imported: boolean;
+    invalid: boolean;
+    visible: boolean;
+    readonly: boolean;
+}
+
+let _cachedPtsClasses: Set<string> | null = null;
+const _ptsFileIndex = new Map<string, PtsIndexItem>();
+const _ptsFileByPath = new Map<string, PtsIndexItem>();
+
+function _warmupPtsIndex(force: boolean = false): void {
+    if (_cachedPtsClasses && !force) return;
+
+    const classes = new Set<string>();
+    classes.add('pts');
+    _ptsFileIndex.clear();
+    _ptsFileByPath.clear();
+
+    const projectPath = (typeof Editor !== 'undefined' && Editor.Project && Editor.Project.path) ? Editor.Project.path : process.cwd();
+    const searchDirs = [
+        path.join(projectPath, 'assets'),
+        path.join(projectPath, 'extensions/pts-asset/assets')
+    ];
+
+    const scan = (dir: string) => {
+        if (!fs.existsSync(dir)) return;
+        let entries: fs.Dirent[];
+        try {
+            entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch {
+            return;
+        }
+        for (const e of entries) {
+            if (e.name === 'node_modules' || e.name === '.git' || e.name === 'temp' || e.name === 'library') continue;
+            const full = path.join(dir, e.name);
+            if (e.isDirectory()) {
+                scan(full);
+            } else if (e.isFile() && e.name.endsWith('.pts')) {
+                const typeInfo = getPtsTypeInfo(full);
+                if (typeInfo && typeInfo.type) {
+                    classes.add(typeInfo.type);
+                }
+                const metaFile = `${full}.meta`;
+                let uuid = '';
+                if (fs.existsSync(metaFile)) {
+                    try {
+                        const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+                        if (meta && meta.uuid) uuid = meta.uuid;
+                    } catch {}
+                }
+                if (uuid) {
+                    _ptsUuids.add(uuid);
+                    if (typeInfo) _ptsTypeCache.set(uuid, typeInfo);
+
+                    const relPath = path.relative(projectPath, full).replace(/\\/g, '/');
+                    const url = `db://${relPath}`;
+                    const assetName = path.basename(full, '.pts');
+
+                    const item: PtsIndexItem = {
+                        uuid,
+                        path: url,
+                        file: full,
+                        url,
+                        name: assetName,
+                        displayName: path.basename(full),
+                        type: typeInfo ? typeInfo.type : 'pts',
+                        ccType: typeInfo ? typeInfo.type : 'pts',
+                        importer: 'pts',
+                        extends: typeInfo && Array.isArray(typeInfo.extends) ? typeInfo.extends : ['pts', 'cc.Asset'],
+                        imported: true,
+                        invalid: false,
+                        visible: true,
+                        readonly: false
+                    };
+                    _ptsFileIndex.set(uuid, item);
+                    _ptsFileByPath.set(full, item);
+                }
+            }
+        }
+    };
+
+    for (const d of searchDirs) scan(d);
+    _cachedPtsClasses = classes;
+}
+
+function _indexSinglePtsFile(filePath: string, knownUuid?: string): void {
+    if (!filePath || !filePath.endsWith('.pts') || !fs.existsSync(filePath)) return;
+    const typeInfo = getPtsTypeInfo(filePath);
+    if (!typeInfo) return;
+
+    let uuid = knownUuid;
+    if (!uuid) {
+        const metaFile = `${filePath}.meta`;
+        if (fs.existsSync(metaFile)) {
+            try {
+                const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+                if (meta && meta.uuid) uuid = meta.uuid;
+            } catch {}
+        }
+    }
+    if (!uuid) return;
+
+    _ptsUuids.add(uuid);
+    _ptsTypeCache.set(filePath, typeInfo);
+    _ptsTypeCache.set(uuid, typeInfo);
+
+    if (_cachedPtsClasses && typeInfo.type) {
+        _cachedPtsClasses.add(typeInfo.type);
+    }
+
+    const projectPath = (typeof Editor !== 'undefined' && Editor.Project && Editor.Project.path) ? Editor.Project.path : process.cwd();
+    const relPath = path.relative(projectPath, filePath).replace(/\\/g, '/');
+    const url = `db://${relPath}`;
+    const assetName = path.basename(filePath, '.pts');
+
+    const item: PtsIndexItem = {
+        uuid,
+        path: url,
+        file: filePath,
+        url,
+        name: assetName,
+        displayName: path.basename(filePath),
+        type: typeInfo.type,
+        ccType: typeInfo.type,
+        importer: 'pts',
+        extends: Array.isArray(typeInfo.extends) ? typeInfo.extends : ['pts', 'cc.Asset'],
+        imported: true,
+        invalid: false,
+        visible: true,
+        readonly: false
+    };
+    _ptsFileIndex.set(uuid, item);
+    _ptsFileByPath.set(filePath, item);
+}
+
+function _removeSinglePtsFile(filePathOrUuid: string): void {
+    _ptsTypeCache.delete(filePathOrUuid);
+    _ptsUuids.delete(filePathOrUuid);
+
+    const byUuid = _ptsFileIndex.get(filePathOrUuid);
+    if (byUuid) {
+        _ptsFileByPath.delete(byUuid.file);
+        _ptsFileIndex.delete(filePathOrUuid);
+        return;
+    }
+    const byPath = _ptsFileByPath.get(filePathOrUuid);
+    if (byPath) {
+        _ptsFileIndex.delete(byPath.uuid);
+        _ptsFileByPath.delete(filePathOrUuid);
+        _ptsUuids.delete(byPath.uuid);
+    }
+}
+
 function _isPtsUuid(uuid: string): boolean {
     if (!uuid || typeof uuid !== 'string') return false;
     if (_ptsUuids.has(uuid)) return true;
     if (_ptsTypeCache.has(uuid)) return true;
+    if (_ptsFileIndex.has(uuid)) return true;
     if (uuid.endsWith('.pts') || uuid.endsWith('.pts.meta')) return true;
-    if (_ptsUuids.size === 0) {
-        try {
-            _getAllPtsClasses();
-        } catch {}
+    if (!_cachedPtsClasses) {
+        _warmupPtsIndex();
         if (_ptsUuids.has(uuid)) return true;
     }
     const typeInfo = getPtsTypeInfo(uuid);
@@ -584,8 +757,8 @@ function _isPtsUuid(uuid: string): boolean {
 }
 
 function _enrichPtsAssetInfo(info: any) {
-    console.log('[pts-asset] Enriching asset info:', info);
     if (!info) return;
+    if (info.__pts_enriched__) return;
     const file = info.file || info.path;
     if (!file || typeof file !== 'string' || !file.endsWith('.pts')) return;
 
@@ -616,51 +789,15 @@ function _enrichPtsAssetInfo(info: any) {
             _ptsTypeCache.set(info.uuid, typeInfo);
             _ptsUuids.add(info.uuid);
         }
+        info.__pts_enriched__ = true;
     }
 }
 
 function _getAllPtsClasses(): Set<string> {
-    const classes = new Set<string>();
-    classes.add('pts');
-
-    for (const info of _ptsTypeCache.values()) {
-        if (info && info.type) classes.add(info.type);
+    if (!_cachedPtsClasses) {
+        _warmupPtsIndex();
     }
-
-    try {
-        const projectPath = (typeof Editor !== 'undefined' && Editor.Project && Editor.Project.path) ? Editor.Project.path : process.cwd();
-        const searchDirs = [
-            path.join(projectPath, 'assets'),
-            path.join(projectPath, 'extensions/pts-asset/assets')
-        ];
-        const scan = (dir: string) => {
-            if (!fs.existsSync(dir)) return;
-            const entries = fs.readdirSync(dir, { withFileTypes: true });
-            for (const e of entries) {
-                if (e.name === 'node_modules' || e.name === '.git') continue;
-                const full = path.join(dir, e.name);
-                if (e.isDirectory()) scan(full);
-                else if (e.isFile() && e.name.endsWith('.pts')) {
-                    const t = getPtsTypeInfo(full);
-                    if (t && t.type) classes.add(t.type);
-                    // Also cache uuid from meta
-                    const metaFile = `${full}.meta`;
-                    if (fs.existsSync(metaFile)) {
-                        try {
-                            const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
-                            if (meta && meta.uuid) {
-                                _ptsUuids.add(meta.uuid);
-                                if (t) _ptsTypeCache.set(meta.uuid, t);
-                            }
-                        } catch {}
-                    }
-                }
-            }
-        };
-        for (const d of searchDirs) scan(d);
-    } catch {}
-
-    return classes;
+    return _cachedPtsClasses || new Set(['pts']);
 }
 
 function _enrichIconConfigMap(map: Record<string, any>) {
@@ -817,87 +954,40 @@ async function _filterAndEnrichQueryAssets(result: any, options?: any): Promise<
         return result;
     }
 
-    // 3. Scan and inject matching .pts assets
+    // 3. Inject matching .pts assets from in-memory index
     try {
-        const projectPath = (typeof Editor !== 'undefined' && Editor.Project && Editor.Project.path) ? Editor.Project.path : process.cwd();
-        const searchDirs = [
-            path.join(projectPath, 'assets'),
-            path.join(projectPath, 'extensions/pts-asset/assets')
-        ];
-        const allPtsFiles: string[] = [];
-
-        const scan = (dir: string) => {
-            if (!fs.existsSync(dir)) return;
-            const entries = fs.readdirSync(dir, { withFileTypes: true });
-            for (const e of entries) {
-                if (e.name === 'node_modules' || e.name === '.git') continue;
-                const full = path.join(dir, e.name);
-                if (e.isDirectory()) scan(full);
-                else if (e.isFile() && e.name.endsWith('.pts')) allPtsFiles.push(full);
-            }
-        };
-        for (const d of searchDirs) scan(d);
+        if (!_cachedPtsClasses) {
+            _warmupPtsIndex();
+        }
 
         const existingUuids = new Set(list.map((r: any) => r && r.uuid));
 
-        for (const ptsFile of allPtsFiles) {
-            const typeInfo = getPtsTypeInfo(ptsFile);
-            if (!typeInfo) continue;
-
+        for (const item of _ptsFileIndex.values()) {
             const matches = requestedTypes.some(req => {
                 if (!req) return false;
                 if (req === 'pts' || req === 'pTSAsset') return true;
-                if (typeInfo.type === req) return true;
-                if (Array.isArray(typeInfo.extends) && typeInfo.extends.includes(req)) return true;
+                if (item.type === req) return true;
+                if (Array.isArray(item.extends) && item.extends.includes(req)) return true;
                 return false;
             });
 
             if (!matches) continue;
 
-            const relPath = path.relative(projectPath, ptsFile).replace(/\\/g, '/');
-            const url = `db://${relPath}`;
-
             // Strictly check options.pattern
             if (options && options.pattern) {
-                const matchesPat = _matchesPattern(url, options.pattern) ||
-                                   _matchesPattern(ptsFile, options.pattern) ||
-                                   _matchesPattern(path.basename(ptsFile, '.pts'), options.pattern);
+                const matchesPat = _matchesPattern(item.url, options.pattern) ||
+                                   _matchesPattern(item.file, options.pattern) ||
+                                   _matchesPattern(item.name, options.pattern);
                 if (!matchesPat) continue;
             }
 
-            const metaFile = `${ptsFile}.meta`;
-            let uuid = '';
-            if (fs.existsSync(metaFile)) {
-                try {
-                    const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
-                    uuid = meta.uuid || '';
-                } catch {}
-            }
-            if (!uuid || existingUuids.has(uuid)) continue;
+            if (existingUuids.has(item.uuid)) continue;
+            existingUuids.add(item.uuid);
 
-            existingUuids.add(uuid);
-            const assetName = path.basename(ptsFile, '.pts');
-
-            list.push({
-                uuid,
-                path: url,
-                file: ptsFile,
-                url,
-                name: assetName,
-                displayName: path.basename(ptsFile),
-                type: typeInfo.type,
-                ccType: typeInfo.type,
-                importer: 'pts',
-                extends: typeInfo.extends,
-                imported: true,
-                invalid: false,
-                visible: true,
-                readonly: false
-            });
-            console.log(`[pts-asset] Injected matching .pts asset for ${requestedTypes.join(',')}: ${assetName} (${typeInfo.type})`);
+            list.push({ ...item });
         }
     } catch (scanErr) {
-        console.error('[pts-asset] Error scanning .pts assets for query:', scanErr);
+        console.error('[pts-asset] Error injecting .pts assets for query:', scanErr);
     }
 
     return isWrapped ? { ...result, assets: list } : list;
@@ -1134,7 +1224,7 @@ export async function load() {
 
     // Warm up pts classes and UUID registry
     try {
-        _getAllPtsClasses();
+        _warmupPtsIndex(true);
     } catch {}
 
     try {
@@ -1151,8 +1241,8 @@ export async function load() {
         }).then((chains: any) => {
             if (chains && typeof chains === 'object') {
                 setRuntimeInheritanceChains(chains);
-                _ptsTypeCache.clear();
-                _getAllPtsClasses();
+                clearInheritanceCache();
+                _warmupPtsIndex(true);
             }
         }).catch(() => {});
     } catch {}
@@ -1168,5 +1258,8 @@ export function unload() {
     _uninstallIpcHook();
     _uninstallMessageHook();
     _ptsTypeCache.clear();
+    _cachedPtsClasses = null;
+    _ptsFileIndex.clear();
+    _ptsFileByPath.clear();
     clearInheritanceCache();
 }

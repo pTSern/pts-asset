@@ -206,6 +206,11 @@
                     "onAssetChanged"
                 ]
             },
+            "asset-db:asset-delete": {
+                "methods": [
+                    "onAssetDeleted"
+                ]
+            },
             "open-panel": {
                 "methods": [
                     "onOpenPanel"
