@@ -2,7 +2,7 @@ import { _decorator, animation, Asset, CCClass, CCString, js } from "cc";
 import { pTSAsset } from "db://pts-core/scripts/pTSAsset";
 import { pGlobal } from "db://pts-core/scripts/utils";
 
-const { ccclass, property, menu } = _decorator;
+const { ccclass, property } = _decorator;
 
 const _$graph = js.getClassByName('cc.animation.AnimationGraphLike');
 
@@ -39,7 +39,7 @@ interface _IGraph {
 
 type _TGraph = animation.AnimationGraphRunTime & Asset & _IGraph;
 @ccclass("pTSAsset_GraphVariable")
-@menu('Animation/Graph')
+@pTSAsset.menu('Animation/Graph')
 export class pTSAsset_GraphVariable extends pTSAsset {
     @property({ type: _$graph })
     protected _graph: _TGraph = null;
@@ -52,7 +52,7 @@ export class pTSAsset_GraphVariable extends pTSAsset {
         this.onFocusInEditor();
     }
 
-    @property({ type: CCString })
+    @property({  })
     variable: string = "";
 
     onFocusInEditor(): void {
