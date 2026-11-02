@@ -369,6 +369,20 @@ export const methods: { [key: string]: (...any: any) => any } = {
         return { success: true };
     },
 
+    logRuntimeInstance(info: { observerId: string; uuid: string; subscriptionId: number }) {
+        const observation = info && _previewObservations.get(info.observerId);
+        if (!_previewContents || _previewContents.isDestroyed() || !_previewSessionId || !observation ||
+            observation.uuid !== info.uuid || !observation.state.found || info.subscriptionId !== observation.subscriptionId) {
+            return { success: false, error: 'No linked runtime instance to log.' };
+        }
+        _previewContents.send('pts-asset:log-runtime-instance', {
+            uuid: observation.uuid,
+            className: observation.className,
+            sessionId: _previewSessionId,
+        });
+        return { success: true };
+    },
+
 };
 
 type PreviewValue = string | number | boolean | null | PreviewValue[] | PreviewValues;
