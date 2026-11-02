@@ -103,7 +103,8 @@ export const $ = {
     jsonDisplay: "#json-display",
     previewBanner: "#preview-banner",
     previewStatusText: "#preview-status-text",
-    previewSubText: "#preview-sub-text"
+    previewSubText: "#preview-sub-text",
+    loggerBtn: "#logger-button"
 };
 
 export const style = `
@@ -163,8 +164,16 @@ ui-section.pts-group-section > ui-label[slot="header"] {
 `;
 
 export const template = `
-<div class="pts-container" style="display: flex; flex-direction: column; height: 100%;">
+<div class="pts-container">
     <style>
+        .pts-container {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            min-height: 0;
+            overflow: hidden;
+        }
+
         ui-section.pts-group-section {
             margin-top: 6px;
             margin-bottom: 6px;
@@ -183,6 +192,94 @@ export const template = `
         }
         .tab-content.active {
             display: block;
+        }
+
+        #preview-banner {
+            display: none;
+            flex: 0 0 auto;
+            flex-direction: column;
+            gap: 2px;
+            padding: 6px 10px;
+            background: #2e7d32;
+            border-bottom: 1px solid #4caf50;
+            color: #fff;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        #preview-status-text {
+            line-height: 1.3;
+        }
+        #preview-sub-text {
+            font-size: 10px;
+            font-weight: 400;
+            opacity: 0.9;
+            line-height: 1.3;
+            word-break: break-word;
+        }
+
+        .pts-toolbar {
+            display: flex;
+            flex: 0 0 auto;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 10px;
+            border-bottom: 1px solid #3a3a3a;
+        }
+        .pts-toolbar.pts-toolbar-flags {
+            padding-top: 0;
+        }
+        .pts-toolbar > ui-button,
+        .pts-toolbar > ui-checkbox {
+            min-width: 0;
+        }
+
+        .pts-toolbar > #save-button {
+            flex: 0 0 calc(80% - 6.4px);
+            min-width: 0;
+        }
+        .pts-toolbar > #fix-button {
+            flex: 0 0 calc(20% - 1.6px);
+            min-width: 0;
+        }
+
+        .pts-props {
+            flex: 1 1 0;
+            min-height: 0;
+            overflow-y: auto;
+            overflow-x: hidden;
+            padding: 8px 10px;
+        }
+
+        .pts-footer {
+            display: flex;
+            flex: 0 0 auto;
+            flex-direction: column;
+            gap: 8px;
+            padding: 8px 10px;
+            border-top: 1px solid #3a3a3a;
+        }
+
+        #logger-button {
+            display: none;
+            flex: 0 0 auto;
+            width: 100%;
+            box-sizing: border-box;
+        }
+
+        .pts-code-block {
+            display: flex;
+            flex: 1 1 auto;
+            flex-direction: column;
+            min-height: 0;
+            gap: 6px;
+        }
+
+        #json-display {
+            display: block;
+            flex: 1 1 auto;
+            min-height: 60px;
+            max-height: 240px;
+            overflow: auto;
         }
 
         @keyframes pts-save-dirty-pulse {
@@ -215,17 +312,23 @@ export const template = `
             box-shadow: 0 0 16px 5px rgba(255, 152, 0, 1) !important;
         }
     </style>
-    <div id="preview-banner" style="display: none; align-items: center; justify-content: space-between; padding: 6px 12px; background: #2e7d32; color: #fff; font-weight: bold; font-size: 12px; border-bottom: 1px solid #4caf50; z-index: 11;">
+
+    <div id="preview-banner">
         <span id="preview-status-text">🟢 Live Preview Mode (Read-Only)</span>
-        <span id="preview-sub-text" style="font-size: 11px; opacity: 0.9;">Runtime Instance Linked</span>
+        <span id="preview-sub-text">Runtime Instance Linked</span>
     </div>
-    <div style="display: flex; align-items: center; gap: 8px; padding: 10px; background: #333; border-bottom: 1px solid #555; z-index: 10;">
-        <ui-button id="save-button" class="blue" style="flex: 1;">Save Changes</ui-button>
-        <ui-button id="fix-button" class="orange" style="width: 80px;">Fix</ui-button>
-        <ui-checkbox id="lazy-toggle" style="margin-left: 4px;" tooltip="Keep this asset alive in _lazy.prefab along with unreferenced dependencies">Lazy</ui-checkbox>
-        <ui-checkbox id="force-lazy-toggle" style="margin-left: 4px; display: none;" tooltip="Force add this .pts asset directly into _lazy.prefab regardless of external or bundle references">Force Lazy</ui-checkbox>
+
+    <div class="pts-toolbar">
+        <ui-button id="save-button" class="blue">Save Changes</ui-button>
+        <ui-button id="fix-button" class="orange">Fix</ui-button>
     </div>
-    <div style="flex: 1; overflow-y: auto; padding: 10px;">
+
+    <div class="pts-toolbar pts-toolbar-flags">
+        <ui-checkbox id="lazy-toggle" tooltip="Keep this asset alive in _lazy.prefab along with unreferenced dependencies">Lazy</ui-checkbox>
+        <ui-checkbox id="force-lazy-toggle" style="display: none;" tooltip="Force add this .pts asset directly into _lazy.prefab regardless of external or bundle references">Force Lazy</ui-checkbox>
+    </div>
+
+    <div class="pts-props">
         <ui-section class="component config" cache-expand="node-component:pTS" expand>
             <header class="component-header" slot="header">
                 <ui-icon default="component" color="true" value="pTS"></ui-icon>
@@ -235,9 +338,13 @@ export const template = `
             <div id="custom-view"></div>
         </ui-section>
     </div>
-    <div class="json_zone" style="padding: 10px; border-top: 1px solid #555; background: #222;">
-        <ui-checkbox id="json-toggle" checked style="margin-bottom: 8px;">Show Code</ui-checkbox>
-        <ui-code id="json-display" language="json" style="display: block; max-height: 300px; overflow-y: auto;"></ui-code>
+
+    <div class="pts-footer">
+        <ui-button id="logger-button" title="console.log this runtime instance to the browser console">📋 Logger</ui-button>
+        <div class="pts-code-block">
+            <ui-checkbox id="json-toggle" checked>Show Code</ui-checkbox>
+            <ui-code id="json-display" language="json"></ui-code>
+        </div>
     </div>
 </div>
 `;
@@ -428,6 +535,13 @@ function setPreviewModeUI(panel: PanelThis, isPreview: boolean, foundInstance: b
             panel.$.forceLazyToggle.removeAttribute('disabled');
             panel.$.forceLazyToggle.disabled = false;
             panel.$.forceLazyToggle.style.opacity = '1';
+        }
+    }
+    if (panel.$.loggerBtn) {
+        if (isPreview && foundInstance) {
+            panel.$.loggerBtn.style.display = 'block';
+        } else {
+            panel.$.loggerBtn.style.display = 'none';
         }
     }
 }
@@ -3070,6 +3184,24 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         console.log('[pTS Inspector] Asset fixed and re-rendered successfully!');
         console.groupEnd();
     };
+
+    if (this.$.loggerBtn) {
+        this.$.loggerBtn.onclick = async () => {
+            const obs = _previewObservers.get(panel);
+            if (!obs || !obs.uuid || !obs.subscriptionId || !obs.state?.found) {
+                console.warn('[pTS Inspector] Logger: no linked runtime instance.');
+                return;
+            }
+            const result = await Editor.Message.request('pts-asset', 'log-runtime-instance', {
+                observerId: obs.observerId,
+                uuid: obs.uuid,
+                subscriptionId: obs.subscriptionId,
+            });
+            if (!result?.success) {
+                console.warn('[pTS Inspector] Logger failed:', result?.error);
+            }
+        };
+    }
 
     console.groupEnd();
 };

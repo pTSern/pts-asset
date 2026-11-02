@@ -156,6 +156,7 @@ Cocos Creator strips assets from release builds if they are not referenced by an
 | `set-runtime-property` | Send | Applies an allowed Inspector edit to the selected runtime instance, in memory only. |
 | `runtime-property-result` | Send | Acknowledges a live edit with its authoritative state, including rejected or normalized values. |
 | `locate-runtime-reference` | Request | Validates a displayed Node/Component reference and locates its owner node in the runtime Hierarchy. |
+| `log-runtime-instance` | Request | `console.log`s the currently linked runtime instance inside the Game View. Returns `{ success }`; fails when no instance is linked. |
 
 ### 5.4. Selected-Instance Live Preview
 
@@ -166,6 +167,8 @@ During in-editor playback, selecting a `.pts` subscribes its Inspector to that U
 * **Selection/lifecycle:** Switching selection or closing the Inspector releases its reference. Stopping preview clears runtime references and restores authoring controls. Playback sessions and subscription identities reject stale snapshots, asynchronous edits, and navigation requests.
 * **Live edits:** Writable properties use one broker path and apply only to game memory. The authoritative edit result reconciles rejected or setter-normalized values. Save, Fix, and lazy/meta authoring writes are disabled during both waiting and linked preview states.
 * **Runtime references:** Declare Node/Component debugging fields with `@editor_property(Node)` or `@editor_property(Component)`, imported from `db://pts-core/scripts/utils/pClass`. These runtime-only fields are not `.pts` authoring data. Their controls show the instance name and a UUID tooltip; clicking locates the owner node in Hierarchy. Component controls also show their type. Null or destroyed references display a disabled **None**, including array elements.
+* **Logger:** While a runtime instance is linked, a full-width **📋 Logger** button appears above the Show Code pane. It runs `console.log('[pTS Logger] <Class> (<uuid>):', instance)` in the Game View, printing the real live asset rather than a serialized snapshot. It is hidden while waiting for an instance.
+* **Enums:** Enum-typed properties render as a `ui-select` of `name → value` options, matching the native Inspector, instead of a bare number. Detection covers both `@property({ type: MyEnum })` and `@editor_property(MyEnum)`; the option list comes from the engine's `Enum.getList()` and works even when `__enums__` has not been materialized yet. Readonly `@editor_property` fields display the current option selected but not editable, as usual.
 
 The main-process broker sends subscription/edit controls directly to the active Game View guest using Electron IPC. Creator 3.8.8's window broadcasts do not reach that guest. Native session announcements identify the sender; changed snapshots and edit acknowledgements return through the extension messages above. Broker-to-Inspector notifications remain ordinary editor broadcasts.
 
@@ -256,5 +259,8 @@ pts-asset/
 
 * Replaced eager `.pts` preview synchronization and Inspector polling with selected-instance subscriptions, changed-state delivery, and explicit playback lifecycle.
 * Added runtime-only Node/Component locator controls and authoritative live-edit acknowledgements.
+* Reworked the Inspector layout: icon/asset header, Save (4× width) + Fix row, Lazy/Force-Lazy row, scrollable property area, then a full-width **Logger** button above the Show Code toggle and scrollable code pane.
+* Added a full-width **Logger** button (above Show Code) that `console.log`s the real linked runtime instance inside the Game View.
+* Enum properties now render as `name → value` dropdowns in live preview (via `cc.Enum.isEnum` / `Enum.getList`), covering `@property({type:Enum})` and `@editor_property(Enum)`.
 * Removed `query-preview-data`; subscribers now use `observe-preview-data` / `unobserve-preview-data`.
 * Added subscription regressions for unchanged states, selection/playback races, release, and stale runtime-reference navigation.

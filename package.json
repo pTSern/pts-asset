@@ -251,6 +251,11 @@
                 "methods": [
                     "setRuntimeProperty"
                 ]
+            },
+            "log-runtime-instance": {
+                "methods": [
+                    "logRuntimeInstance"
+                ]
             }
         }
     }
