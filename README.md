@@ -150,8 +150,28 @@ Cocos Creator strips assets from release builds if they are not referenced by an
 | `create-pts-asset` | Request | Programmatically creates a new `.pts` asset with specified class type and path. |
 | `pts::importer::lookup` | Send | Re-evaluates importer bindings and re-imports dirty `.pts` assets. |
 | `fix-all-pts-assets` | Request | Batch migrates legacy or malformed `.pts` files across the project. |
-| `sync-preview-data` | Send | Pushes live inspector property changes to the runtime preview context. |
-| `query-preview-data` | Request | Retrieves active preview state for a given asset UUID. |
+| `observe-preview-data` | Request | Subscribes an Inspector to an existing hydrated instance by UUID; returns its current preview state and subscription identity. |
+| `unobserve-preview-data` | Request | Releases that Inspector's subscription and retained runtime reference. |
+| `sync-preview-data` | Send | Accepts changed runtime snapshots for the current playback session and Inspector subscription. |
+| `set-runtime-property` | Send | Applies an allowed Inspector edit to the selected runtime instance, in memory only. |
+| `runtime-property-result` | Send | Acknowledges a live edit with its authoritative state, including rejected or normalized values. |
+| `locate-runtime-reference` | Request | Validates a displayed Node/Component reference and locates its owner node in the runtime Hierarchy. |
+
+### 5.4. Selected-Instance Live Preview
+
+During in-editor playback, selecting a `.pts` subscribes its Inspector to that UUID. The preview bridge in `pts-core/src/_cc.js` looks only in existing gameplay asset caches. Inspecting an asset never loads, constructs, or hydrates it.
+
+* **Not hydrated:** The Inspector displays **Waiting for runtime instance...** without creating an authoring substitute. It links automatically if gameplay later loads and hydrates that asset.
+* **Hydrated:** The inspection cache retains the actual selected instance. Only subscribed instances are sampled every 200 ms; no subscription means no observer timer. Unchanged displayed state sends no snapshot IPC and causes no Inspector re-render.
+* **Selection/lifecycle:** Switching selection or closing the Inspector releases its reference. Stopping preview clears runtime references and restores authoring controls. Playback sessions and subscription identities reject stale snapshots, asynchronous edits, and navigation requests.
+* **Live edits:** Writable properties use one broker path and apply only to game memory. The authoritative edit result reconciles rejected or setter-normalized values. Save, Fix, and lazy/meta authoring writes are disabled during both waiting and linked preview states.
+* **Runtime references:** Declare Node/Component debugging fields with `@editor_property(Node)` or `@editor_property(Component)`, imported from `db://pts-core/scripts/utils/pClass`. These runtime-only fields are not `.pts` authoring data. Their controls show the instance name and a UUID tooltip; clicking locates the owner node in Hierarchy. Component controls also show their type. Null or destroyed references display a disabled **None**, including array elements.
+
+The main-process broker sends subscription/edit controls directly to the active Game View guest using Electron IPC. Creator 3.8.8's window broadcasts do not reach that guest. Native session announcements identify the sender; changed snapshots and edit acknowledgements return through the extension messages above. Broker-to-Inspector notifications remain ordinary editor broadcasts.
+
+This replaces debug-only eager registries and full-registry snapshot producers. Normal asset loading, hydration, cloning, and gameplay-owned lazy caches are unchanged. The observer samples declared properties and explicit editor-property metadata, not arbitrary engine object graphs or prototype getters.
+
+Focused broker regression check: `npm run test:preview-subscriptions` from `extensions/pts-asset`.
 
 ---
 
@@ -229,3 +249,12 @@ pts-asset/
 │   └── pts.ts                       # Format serialization & deserialization
 └── tsconfig.json
 ```
+
+## 8. Changelog
+
+### Unreleased
+
+* Replaced eager `.pts` preview synchronization and Inspector polling with selected-instance subscriptions, changed-state delivery, and explicit playback lifecycle.
+* Added runtime-only Node/Component locator controls and authoritative live-edit acknowledgements.
+* Removed `query-preview-data`; subscribers now use `observe-preview-data` / `unobserve-preview-data`.
+* Added subscription regressions for unchanged states, selection/playback races, release, and stale runtime-reference navigation.

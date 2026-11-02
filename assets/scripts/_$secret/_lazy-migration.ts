@@ -26,10 +26,6 @@ export function registerLazyAsset(asset: Asset): void {
     const rawUuid = (asset as any)._uuid || (asset as any).uuid;
     if (rawUuid) {
         lazyAssetsCache.set(rawUuid, asset);
-        if (!BUILD && pConst.EDITOR_ONLY_IN_PREVIEW) {
-            globalThis['__pTS_LIVE_ASSETS__'] = globalThis['__pTS_LIVE_ASSETS__'] || new Map<string, any>();
-            globalThis['__pTS_LIVE_ASSETS__'].set(rawUuid, asset);
-        }
     }
     try {
         const utils = (assetManager as any)?.utils;
@@ -38,18 +34,12 @@ export function registerLazyAsset(asset: Asset): void {
                 const decoded = utils.decodeUuid(rawUuid);
                 if (decoded && decoded !== rawUuid) {
                     lazyAssetsCache.set(decoded, asset);
-                    if (!BUILD && pConst.EDITOR_ONLY_IN_PREVIEW && globalThis['__pTS_LIVE_ASSETS__']) {
-                        globalThis['__pTS_LIVE_ASSETS__'].set(decoded, asset);
-                    }
                 }
             }
             if (typeof utils.compressUuid === 'function') {
                 const compressed = utils.compressUuid(rawUuid);
                 if (compressed && compressed !== rawUuid) {
                     lazyAssetsCache.set(compressed, asset);
-                    if (!BUILD && pConst.EDITOR_ONLY_IN_PREVIEW && globalThis['__pTS_LIVE_ASSETS__']) {
-                        globalThis['__pTS_LIVE_ASSETS__'].set(compressed, asset);
-                    }
                 }
             }
         }

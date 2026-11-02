@@ -8,6 +8,7 @@
     "scripts": {
         "preinstall": "node ./scripts/preinstall.js",
         "build": "tsc",
+        "test:preview-subscriptions": "node ./scripts/test-preview-subscriptions.js",
         "test:query-isolation": "node ./scripts/test-query-isolation.js",
         "watch": "tsc -w"
     },
@@ -226,9 +227,24 @@
                     "syncPreviewData"
                 ]
             },
-            "query-preview-data": {
+            "observe-preview-data": {
                 "methods": [
-                    "queryPreviewData"
+                    "observePreviewData"
+                ]
+            },
+            "unobserve-preview-data": {
+                "methods": [
+                    "unobservePreviewData"
+                ]
+            },
+            "locate-runtime-reference": {
+                "methods": [
+                    "locateRuntimeReference"
+                ]
+            },
+            "runtime-property-result": {
+                "methods": [
+                    "runtimePropertyResult"
                 ]
             },
             "set-runtime-property": {
