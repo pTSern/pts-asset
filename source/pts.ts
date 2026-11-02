@@ -253,10 +253,69 @@ let _lastSaveTime = 0;
 let _lastLazyState: boolean | null = null;
 let _lastForceLazyState: boolean | null = null;
 let _isInLivePreviewMode = false;
-let _previewPollTimer: any = null;
-let _livePreviewValues: Record<string, any> | null = null;
+interface InspectorDump {
+    [key: string]: unknown;
+    name?: string;
+    type?: string;
+    displayName?: string;
+    readonly?: boolean;
+    visible?: boolean;
+    isArray?: boolean;
+    isEditorProp?: boolean;
+    elementTypeData?: InspectorDump;
+    extends?: string[];
+    value?: unknown;
+    default?: unknown;
+}
+interface InspectorDumpRoot {
+    value: Record<string, InspectorDump>;
+    [key: string]: unknown;
+}
+interface InspectorPropElement extends HTMLElement {
+    dump: InspectorDump;
+    render(dump: InspectorDump): void;
+    __ptsRenderedSignature?: string;
+}
+interface RuntimeReference {
+    __runtimeReference__: 'node' | 'component';
+    uuid: string;
+    nodeUuid: string;
+    name: string;
+    componentType?: string;
+}
+interface PreviewState {
+    isPreview: boolean;
+    found: boolean;
+    subscriptionId: number;
+    values?: Record<string, unknown>;
+    editorProps?: Record<string, InspectorDump>;
+    dump?: InspectorDumpRoot;
+    visibility?: Record<string, boolean>;
+    arrayVisibility?: Record<string, Record<string, boolean>[]>;
+    enumLists?: Record<string, unknown>;
+}
+interface PreviewObserver {
+    observerId: string;
+    uuid: string;
+    epoch: number;
+    subscriptionId: number;
+    retiredSubscriptionId: number;
+    pendingState: PreviewState | null;
+    state: PreviewState | null;
+    signature: string;
+    listener: (payload: unknown) => void;
+    propertyListener: (payload: unknown) => void;
+    focus?: () => void;
+    blur?: () => void;
+}
+const _previewObservers = new WeakMap<PanelThis, PreviewObserver>();
+let _observerSequence = 0;
+let _authoringDump: InspectorDumpRoot | null = null;
+let _renderedPreviewUI = '';
+let _livePreviewValues: Record<string, unknown> | null = null;
 let _currentPanel: PanelThis | null = null;
 let _isDirty = false;
+let _autoSaveTimer: NodeJS.Timeout | number | null = null;
 
 function setSaveButtonDirtyState(isDirty: boolean, panel?: PanelThis | null) {
     _isDirty = isDirty;
@@ -284,6 +343,9 @@ function setSaveButtonDirtyState(isDirty: boolean, panel?: PanelThis | null) {
 }
 
 function setPreviewModeUI(panel: PanelThis, isPreview: boolean, foundInstance: boolean) {
+    const signature = `${isPreview}:${foundInstance}`;
+    if (_renderedPreviewUI === signature) return;
+    _renderedPreviewUI = signature;
     _isInLivePreviewMode = isPreview;
     if (!isPreview) {
         _livePreviewValues = null;
@@ -341,6 +403,11 @@ function setPreviewModeUI(panel: PanelThis, isPreview: boolean, foundInstance: b
             panel.$.fix.title = '';
         }
     }
+    if (panel.$.ptsa) {
+        panel.$.ptsa.disabled = isPreview;
+        if (isPreview) panel.$.ptsa.setAttribute('disabled', 'true');
+        else panel.$.ptsa.removeAttribute('disabled');
+    }
     if (panel.$.lazyToggle) {
         if (isPreview) {
             panel.$.lazyToggle.setAttribute('disabled', 'true');
@@ -365,202 +432,399 @@ function setPreviewModeUI(panel: PanelThis, isPreview: boolean, foundInstance: b
     }
 }
 
-function stopPreviewPolling() {
-    if (_previewPollTimer) {
-        clearInterval(_previewPollTimer);
-        _previewPollTimer = null;
+
+function parseInspectorDump(value: unknown): InspectorDump | null {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    // Dump metadata has extensible keys; consumed fields are validated below.
+    const candidate = value as Record<string, unknown>;
+    for (const key of ['name', 'type', 'displayName']) {
+        if (candidate[key] !== undefined && typeof candidate[key] !== 'string') return null;
     }
+    for (const key of ['readonly', 'visible', 'isArray', 'isEditorProp']) {
+        if (candidate[key] !== undefined && typeof candidate[key] !== 'boolean') return null;
+    }
+    if (candidate.extends !== undefined && (!Array.isArray(candidate.extends) || !candidate.extends.every(item => typeof item === 'string'))) return null;
+    const elementTypeData = candidate.elementTypeData === undefined ? undefined : parseInspectorDump(candidate.elementTypeData);
+    if (elementTypeData === null) return null;
+    return {
+        ...candidate,
+        name: typeof candidate.name === 'string' ? candidate.name : undefined,
+        type: typeof candidate.type === 'string' ? candidate.type : undefined,
+        displayName: typeof candidate.displayName === 'string' ? candidate.displayName : undefined,
+        readonly: typeof candidate.readonly === 'boolean' ? candidate.readonly : undefined,
+        visible: typeof candidate.visible === 'boolean' ? candidate.visible : undefined,
+        isArray: typeof candidate.isArray === 'boolean' ? candidate.isArray : undefined,
+        isEditorProp: typeof candidate.isEditorProp === 'boolean' ? candidate.isEditorProp : undefined,
+        extends: Array.isArray(candidate.extends) ? candidate.extends : undefined,
+        elementTypeData
+    };
 }
 
-function startPreviewPolling(panel: PanelThis) {
-    stopPreviewPolling();
-    _previewPollTimer = setInterval(() => {
-        refreshLiveState(panel);
-    }, 250);
+function parsePreviewState(value: unknown): PreviewState | null {
+    if (!value || typeof value !== 'object' || !('isPreview' in value) || !('found' in value) || !('subscriptionId' in value) ||
+        typeof value.isPreview !== 'boolean' || typeof value.found !== 'boolean' ||
+        typeof value.subscriptionId !== 'number' || !Number.isSafeInteger(value.subscriptionId) || value.subscriptionId <= 0) return null;
+    // The envelope is checked above; optional payloads are parsed below.
+    const candidate = value as Record<string, unknown>;
+    const state: PreviewState = { isPreview: value.isPreview, found: value.found, subscriptionId: value.subscriptionId };
+    for (const key of ['values', 'enumLists'] as const) {
+        const dictionary = candidate[key];
+        if (dictionary !== undefined) {
+            if (!dictionary || typeof dictionary !== 'object' || Array.isArray(dictionary)) return null;
+            state[key] = Object.fromEntries(Object.entries(dictionary));
+        }
+    }
+    if (candidate.visibility !== undefined) {
+        if (!candidate.visibility || typeof candidate.visibility !== 'object' || Array.isArray(candidate.visibility)) return null;
+        state.visibility = {};
+        for (const [key, visible] of Object.entries(candidate.visibility)) {
+            if (typeof visible !== 'boolean') return null;
+            state.visibility[key] = visible;
+        }
+    }
+    if (candidate.arrayVisibility !== undefined) {
+        if (!candidate.arrayVisibility || typeof candidate.arrayVisibility !== 'object' || Array.isArray(candidate.arrayVisibility)) return null;
+        state.arrayVisibility = {};
+        for (const [key, items] of Object.entries(candidate.arrayVisibility)) {
+            if (!Array.isArray(items)) return null;
+            const itemVisibility: Record<string, boolean>[] = [];
+            for (const item of items) {
+                if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+                const visibility: Record<string, boolean> = {};
+                for (const [field, visible] of Object.entries(item)) {
+                    if (typeof visible !== 'boolean') return null;
+                    visibility[field] = visible;
+                }
+                itemVisibility.push(visibility);
+            }
+            state.arrayVisibility[key] = itemVisibility;
+        }
+    }
+    if (candidate.editorProps !== undefined) {
+        if (!candidate.editorProps || typeof candidate.editorProps !== 'object' || Array.isArray(candidate.editorProps)) return null;
+        state.editorProps = {};
+        for (const [key, metadata] of Object.entries(candidate.editorProps)) {
+            const item = parseInspectorDump(metadata);
+            if (!item) return null;
+            state.editorProps[key] = item;
+        }
+    }
+    if (candidate.dump !== undefined) {
+        if (!candidate.dump || typeof candidate.dump !== 'object' || !('value' in candidate.dump) ||
+            !candidate.dump.value || typeof candidate.dump.value !== 'object' || Array.isArray(candidate.dump.value)) return null;
+        const dump: InspectorDumpRoot = { ...candidate.dump, value: {} };
+        for (const [key, metadata] of Object.entries(candidate.dump.value)) {
+            const item = parseInspectorDump(metadata);
+            if (!item) return null;
+            dump.value[key] = item;
+        }
+        state.dump = dump;
+    }
+    return state;
 }
 
-async function refreshLiveState(panel: PanelThis) {
-    if (!_currentAsset) return;
+function ensurePreviewObserver(panel: PanelThis): PreviewObserver {
+    const existing = _previewObservers.get(panel);
+    if (existing) return existing;
+    const observer: PreviewObserver = {
+        observerId: `pts-inspector-${Date.now().toString(36)}-${++_observerSequence}-${Math.random().toString(36).slice(2)}`,
+        uuid: '', epoch: 0, subscriptionId: 0, retiredSubscriptionId: 0, pendingState: null, state: null, signature: '',
+        listener: (payload: unknown) => {
+            if (!payload || typeof payload !== 'object' || !('observerId' in payload) || !('uuid' in payload) ||
+                !('state' in payload) || !('subscriptionId' in payload) ||
+                payload.observerId !== observer.observerId || payload.uuid !== observer.uuid || !observer.uuid) return;
+            const state = parsePreviewState(payload.state);
+            if (!state || payload.subscriptionId !== state.subscriptionId || state.subscriptionId <= observer.retiredSubscriptionId ||
+                state.subscriptionId < observer.subscriptionId) return;
+            if (!observer.subscriptionId) {
+                if (!observer.pendingState || state.subscriptionId >= observer.pendingState.subscriptionId) observer.pendingState = state;
+                return;
+            }
+            observer.subscriptionId = state.subscriptionId;
+            acceptPreviewState(panel, observer, state);
+        },
+        propertyListener: (payload: unknown) => {
+            if (!payload || typeof payload !== 'object' || !('observerId' in payload) || !('uuid' in payload) ||
+                !('result' in payload) || !('subscriptionId' in payload) || !observer.subscriptionId ||
+                payload.observerId !== observer.observerId || payload.uuid !== observer.uuid ||
+                payload.subscriptionId !== observer.subscriptionId || _currentPanel !== panel) return;
+            const result = payload.result;
+            if (!result || typeof result !== 'object' || !('success' in result) || typeof result.success !== 'boolean') return;
+            const state = 'state' in result ? parsePreviewState(result.state) : null;
+            if (!state || state.subscriptionId !== observer.subscriptionId) return;
+            acceptPreviewState(panel, observer, state);
+            // An unchanged authoritative snapshot still acknowledges this edit.
+            reconcilePreviewFields(panel);
+            if (!result.success) {
+                const error = 'error' in result && typeof result.error === 'string' ? result.error : 'The runtime rejected this edit.';
+                console.warn('[pTS Inspector] Runtime property edit failed:', error);
+                if (panel.$.previewSubText) panel.$.previewSubText.textContent = error;
+            } else if (panel.$.previewSubText && observer.state?.isPreview && observer.state.found) {
+                panel.$.previewSubText.textContent = 'Edits apply directly to game memory in real-time. Disk saving is disabled.';
+            }
+        }
+    };
+    _previewObservers.set(panel, observer);
+    Editor.Message.addBroadcastListener('pts-asset:preview-data-changed', observer.listener);
+    Editor.Message.addBroadcastListener('pts-asset:runtime-property-result', observer.propertyListener);
+    return observer;
+}
 
+function releasePreviewSelection(panel: PanelThis) {
+    const observer = _previewObservers.get(panel);
+    if (!observer) return;
+    if (_autoSaveTimer) {
+        clearTimeout(_autoSaveTimer);
+        _autoSaveTimer = null;
+    }
+    observer.epoch++;
+    observer.retiredSubscriptionId = Math.max(observer.retiredSubscriptionId, observer.subscriptionId);
+    observer.subscriptionId = 0;
+    observer.pendingState = null;
+    observer.uuid = '';
+    observer.state = null;
+    observer.signature = '';
+    Editor.Message.send('pts-asset', 'unobserve-preview-data', { observerId: observer.observerId });
+}
+
+async function observePreviewSelection(panel: PanelThis, uuid: string, className: string) {
+    const observer = ensurePreviewObserver(panel);
+    observer.uuid = uuid;
+    const epoch = observer.epoch;
     try {
-        const assetName = _currentAsset.displayName ? _currentAsset.displayName.replace(/\.pts$/, '') : (_currentAsset.name || '');
-        let state = await Editor.Message.request(
-            'pts-asset',
-            'query-preview-data',
-            _currentAsset.uuid,
-            _cachedData?.__type__ || '',
-            assetName
-        ) as any;
-
-        // Fallback: check scene script if needed
-        if (!state || !state.isPreview) {
-            try {
-                const sceneState = await Editor.Message.request(
-                    'scene',
-                    'execute-scene-script',
-                    {
-                        name: 'pts-core',
-                        method: 'get_pts_runtime_state',
-                        args: [_currentAsset.uuid, _cachedData?.__type__ || '']
-                    }
-                ) as any;
-                if (sceneState && sceneState.isPreview) {
-                    state = sceneState;
-                }
-            } catch {}
-        }
-
-        if (!state || !state.isPreview) {
-            if (_isInLivePreviewMode) {
-                // Preview stopped! Switch back to normal design mode
-                setPreviewModeUI(panel, false, false);
-                stopPreviewPolling();
-                _livePreviewValues = null;
-                // Clean up any runtime-only editor props from _lastDump
-                if (_lastDump && _lastDump.value) {
-                    for (const k of Object.keys(_lastDump.value)) {
-                        if (_lastDump.value[k]?.isEditorProp || _lastDump.value[k]?.group?.name === '_Debugger') {
-                            delete _lastDump.value[k];
-                        }
-                    }
-                }
-                if (_currentAsset && _currentAsset.file) {
-                    try {
-                        const fileContent = fs.readFileSync(_currentAsset.file, { encoding: 'utf8' });
-                        _cachedData = JSON.parse(fileContent);
-                        if (_lastDump && _lastDump.value) {
-                            renderView.call(panel, _lastDump.value);
-                        }
-                    } catch {}
-                }
-            }
-            return;
-        }
-
-        setPreviewModeUI(panel, true, !!state.found);
-
-        if (state.found && state.values && _lastDump && _lastDump.value) {
-            let hasNewFields = false;
-
-            // 1. Incorporate dump items from state.dump (from scene script)
-            if (state.dump && state.dump.value) {
-                for (const k of Object.keys(state.dump.value)) {
-                    if (_ignores.includes(k)) continue;
-                    if (!_lastDump.value[k]) {
-                        _lastDump.value[k] = state.dump.value[k];
-                        hasNewFields = true;
-                    }
-                }
-            }
-
-            // 2. Incorporate @editor_property definitions from state.editorProps
-            if (state.editorProps && typeof state.editorProps === 'object') {
-                for (const [k, meta] of Object.entries(state.editorProps as Record<string, any>)) {
-                    if (_ignores.includes(k)) continue;
-                    // Only incorporate if state.values actually has this key
-                    if (state.values && !(k in state.values)) continue;
-                    if (!_lastDump.value[k]) {
-                        let typeName = 'Unknown';
-                        const v = state.values[k];
-                        if (meta.type) {
-                            typeName = String(meta.type);
-                        } else if (typeof v === 'boolean') {
-                            typeName = 'Boolean';
-                        } else if (typeof v === 'number') {
-                            typeName = Number.isInteger(v) ? 'Integer' : 'Float';
-                        } else if (typeof v === 'string') {
-                            typeName = 'String';
-                        }
-                        _lastDump.value[k] = {
-                            name: k,
-                            type: typeName,
-                            value: v,
-                            default: v,
-                            visible: true,
-                            readonly: meta.readonly !== false,
-                            displayName: meta.name || k,
-                            group: meta.group || { name: "_Debugger", id: "0" },
-                            isEditorProp: true
-                        };
-                        hasNewFields = true;
-                    } else {
-                        if (_lastDump.value[k].visible === false) {
-                            _lastDump.value[k].visible = true;
-                            hasNewFields = true;
-                        }
-                    }
-                }
-            }
-
-            // 3. Fallback: If any key in state.values is not in _lastDump.value and not ignored
-            for (const k of Object.keys(state.values)) {
-                if (_ignores.includes(k) || k.startsWith('_') || k.startsWith('__')) continue;
-                if (state.values[k] === undefined) continue;
-                if (!_lastDump.value[k]) {
-                    const v = state.values[k];
-                    let typeName = 'Unknown';
-                    if (typeof v === 'boolean') typeName = 'Boolean';
-                    else if (typeof v === 'number') typeName = Number.isInteger(v) ? 'Integer' : 'Float';
-                    else if (typeof v === 'string') typeName = 'String';
-                    _lastDump.value[k] = {
-                        name: k,
-                        type: typeName,
-                        value: v,
-                        default: v,
-                        visible: true,
-                        readonly: true,
-                        displayName: k,
-                        group: { name: "_Debugger", id: "0" },
-                        isEditorProp: true
-                    };
-                    hasNewFields = true;
-                }
-            }
-
-            _livePreviewValues = state.values;
-            if (hasNewFields) {
-                renderView.call(panel, _lastDump.value);
-            }
-            updateLiveDumpAndFields(panel, state.values);
-        }
-    } catch {}
+        const response: unknown = await Editor.Message.request('pts-asset', 'observe-preview-data', {
+            observerId: observer.observerId, uuid, className
+        });
+        const state = parsePreviewState(response);
+        if (observer.epoch !== epoch || observer.uuid !== uuid || _currentPanel !== panel) return;
+        if (!state || state.subscriptionId <= observer.retiredSubscriptionId) return;
+        // Keep only broadcasts from this subscription or a newer playback session.
+        const pending = observer.pendingState;
+        observer.pendingState = null;
+        const latest = pending && pending.subscriptionId >= state.subscriptionId ? pending : state;
+        observer.subscriptionId = latest.subscriptionId;
+        acceptPreviewState(panel, observer, latest);
+    } catch (error) {
+        console.warn('[pTS Inspector] Failed to observe preview data:', error);
+    }
 }
 
-function updateLiveDumpAndFields(panel: PanelThis, liveValues: Record<string, any>) {
-    if (!panel.$.view || !_lastDump || !_lastDump.value) return;
+function isEditingProperty(panel: PanelThis, element?: HTMLElement | null): boolean {
+    const root = panel.$.view?.getRootNode();
+    let active = root instanceof ShadowRoot || root instanceof Document ? root.activeElement : document.activeElement;
+    while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+    for (let node: Node | null = active; node; node = node.parentNode || (node instanceof ShadowRoot ? node.host : null)) {
+        if (node === (element || panel.$.view)) return true;
+    }
+    return false;
+}
 
-    let needsFullReRender = false;
-    const activeEl = typeof document !== 'undefined' ? document.activeElement : null;
+function acceptPreviewState(panel: PanelThis, observer: PreviewObserver, state: PreviewState) {
+    if (_currentPanel !== panel || !_currentAsset || observer.uuid !== _currentAsset.uuid || !state) return;
+    const signature = JSON.stringify(state);
+    if (signature === observer.signature) return;
+    observer.signature = signature;
+    observer.state = state;
+    const wasPreview = _isInLivePreviewMode;
+    if (!wasPreview && state.isPreview && _lastDump?.value) {
+        _authoringDump = JSON.parse(JSON.stringify(_lastDump));
+        _lastDump = JSON.parse(JSON.stringify(_lastDump));
+    }
+    setPreviewModeUI(panel, !!state.isPreview, !!state.found);
+    if (state.isPreview) {
+        stopInspectorTicking();
+        if (_autoSaveTimer) {
+            clearTimeout(_autoSaveTimer);
+            _autoSaveTimer = null;
+        }
+        _livePreviewValues = state.found && state.values ? JSON.parse(JSON.stringify(state.values)) : null;
+    } else {
+        _livePreviewValues = null;
+        if (wasPreview && _authoringDump) {
+            _lastDump = JSON.parse(JSON.stringify(_authoringDump));
+            renderView.call(panel, _lastDump.value);
+        } else if (wasPreview) {
+            requestAuthoringDump(panel, observer);
+        }
+        startInspectorTicking(panel);
+    }
+    reconcilePreviewFields(panel);
+}
 
-    for (const key of Object.keys(liveValues)) {
-        if (_ignores.includes(key)) continue;
-        const liveVal = liveValues[key];
-        const dumpItem = _lastDump.value[key];
-        if (!dumpItem) continue;
+function isAuthoringSelection(panel: PanelThis): boolean {
+    const observer = _previewObservers.get(panel);
+    return _currentPanel === panel && !!observer?.uuid && observer.uuid === _currentAsset?.uuid &&
+        observer.state?.isPreview === false;
+}
 
-        const prevArrayLen = dumpItem.isArray && Array.isArray(dumpItem.value) ? dumpItem.value.length : -1;
-        populateDumpWithSaved(dumpItem, liveVal);
+async function requestAuthoringDump(panel: PanelThis, observer: PreviewObserver) {
+    if (!isAuthoringSelection(panel) || !_currentAsset || !_cachedData?.__type__) return;
+    const epoch = observer.epoch;
+    const uuid = _currentAsset.uuid;
+    try {
+        const dump: InspectorDumpRoot | null = await Editor.Message.request('scene', 'execute-scene-script', {
+            name: 'pts-core', method: 'dump', args: [_cachedData.__type__, _cachedData.__value__]
+        });
+        if (_isInLivePreviewMode || observer.epoch !== epoch || observer.uuid !== uuid || _currentPanel !== panel) return;
+        if (!dump?.value) return;
+        _authoringDump = JSON.parse(JSON.stringify(dump));
+        _lastDump = dump;
+        renderView.call(panel, dump.value);
+    } catch (error) {
+        console.warn('[pTS Inspector] Failed to read authoring metadata:', error);
+    }
+}
 
-        const el = panel.$.view.querySelector(`.pts-basic-prop[data-key="${key}"]`) as any;
-        if (el) {
-            el.dump = dumpItem;
-            // Prevent wiping user's typing or stealing focus while actively editing a field
-            const isInteracting = activeEl && el.contains(activeEl);
-            if (!isInteracting) {
-                if (el.render) el.render(dumpItem);
-            }
+function isRuntimeReference(value: unknown): value is RuntimeReference {
+    return !!value && typeof value === 'object' && '__runtimeReference__' in value &&
+        (value.__runtimeReference__ === 'node' || value.__runtimeReference__ === 'component') &&
+        'uuid' in value && typeof value.uuid === 'string' &&
+        'nodeUuid' in value && typeof value.nodeUuid === 'string' &&
+        'name' in value && typeof value.name === 'string' &&
+        (!('componentType' in value) || value.componentType === undefined || typeof value.componentType === 'string');
+}
+
+function isRuntimeReferenceField(item: InspectorDump, value?: unknown): boolean {
+    return !!item && !!item.isEditorProp && (
+        isNodeOrComponent(item) || isNodeOrComponentArray(item) || isRuntimeReference(value) ||
+        (Array.isArray(value) && value.some(isRuntimeReference))
+    );
+}
+
+function populateInspectorValue(item: InspectorDump, value: unknown) {
+    if (isRuntimeReferenceField(item, value)) {
+        item.readonly = true;
+        item.value = value === undefined ? (item.isArray ? [] : null) : value;
+        return;
+    }
+    populateDumpWithSaved(item, value);
+}
+
+function renderRuntimeReferenceField(panel: PanelThis, element: HTMLElement, item: InspectorDump) {
+    element.innerHTML = '';
+    element.setAttribute('readonly', 'true');
+    const label = document.createElement('ui-label');
+    label.setAttribute('slot', 'label');
+    label.textContent = item.displayName || _format(item.name || '');
+    element.appendChild(label);
+    const content = document.createElement('div');
+    content.setAttribute('slot', 'content');
+    content.style.cssText = 'display:flex;flex-direction:column;gap:4px;min-width:0';
+    const values = item.isArray ? (Array.isArray(item.value) ? item.value : []) : [item.value];
+    if (item.isArray && !values.length) content.textContent = '[]';
+    values.forEach((reference: unknown, index: number) => {
+        const button = document.createElement('ui-button');
+        const prefix = item.isArray ? `[${index}] ` : '';
+        button.textContent = isRuntimeReference(reference)
+            ? `${prefix}${reference.name || reference.nodeUuid}${reference.componentType ? ` (${reference.componentType})` : ''}`
+            : `${prefix}None`;
+        button.title = isRuntimeReference(reference)
+            ? `Locate runtime ${reference.__runtimeReference__}: ${reference.uuid}\nOwner node: ${reference.nodeUuid}`
+            : 'No live runtime reference';
+        if (!isRuntimeReference(reference)) button.setAttribute('disabled', 'true');
+        button.addEventListener('click', () => {
+            const observer = _previewObservers.get(panel);
+            if (!observer?.state?.isPreview || !observer.state.found || !isRuntimeReference(reference)) return;
+            Editor.Message.request('pts-asset', 'locate-runtime-reference', {
+                observerId: observer.observerId, subscriptionId: observer.subscriptionId, uuid: observer.uuid, reference
+            }).catch((error: unknown) => console.warn('[pTS Inspector] Cannot locate runtime reference:', error));
+        });
+        content.appendChild(button);
+    });
+    element.appendChild(content);
+}
+
+function reconcilePreviewFields(panel: PanelThis) {
+    const state = _previewObservers.get(panel)?.state;
+    if (!state?.isPreview) return;
+    if (!state.found || !state.values) {
+        if (!isEditingProperty(panel) && panel.$.view) {
+            _lastDump = null;
+            panel.$.view.innerHTML = '';
+        }
+        return;
+    }
+    // Retain the latest authoritative snapshot while the user is typing.
+    _livePreviewValues = JSON.parse(JSON.stringify(state.values));
+    if (isEditingProperty(panel)) {
+        updateLiveDumpAndFields(panel, _livePreviewValues || {});
+        return;
+    }
+    let structureChanged = false;
+    if (!_lastDump?.value && state.dump) {
+        _lastDump = JSON.parse(JSON.stringify(state.dump));
+        structureChanged = true;
+    }
+    if (!_lastDump?.value) return;
+    const metadata = state.editorProps || {};
+    const definitions = state.dump?.value || metadata;
+    for (const [key, definition] of Object.entries(definitions)) {
+        if (_ignores.includes(key) || key in metadata) continue;
+        const current = _lastDump.value[key];
+        const next = JSON.parse(JSON.stringify(definition));
+        next.default = current?.default;
+        if (JSON.stringify({ ...current, value: undefined, default: undefined, path: undefined }) !==
+            JSON.stringify({ ...next, value: undefined, default: undefined, path: undefined })) structureChanged = true;
+        _lastDump.value[key] = next;
+    }
+    for (const key of Object.keys(_lastDump.value)) {
+        if (_lastDump.value[key]?.isEditorProp && !(key in metadata)) {
+            delete _lastDump.value[key];
+            structureChanged = true;
         }
     }
-
-    if (needsFullReRender) {
-        renderView.call(panel, _lastDump.value);
+    for (const [key, meta] of Object.entries(metadata)) {
+        if (_ignores.includes(key)) continue;
+        const value = _livePreviewValues?.[key];
+        const type = meta.type || (isRuntimeReference(value) ? (value.__runtimeReference__ === 'node' ? 'cc.Node' : 'cc.Component')
+            : typeof value === 'boolean' ? 'Boolean' : typeof value === 'number' ? 'Float' : typeof value === 'string' ? 'String' : 'Unknown');
+        const definition = {
+            ...meta, name: key, type, visible: meta.visible !== false,
+            readonly: isRuntimeReferenceField({ ...meta, isEditorProp: true }, value) || meta.readonly !== false,
+            displayName: meta.displayName || meta.name || key,
+            group: meta.group || { name: '_Debugger', id: '0' }, isEditorProp: true
+        };
+        const current = _lastDump.value[key];
+        const previousDefinition = current && { ...current, value: undefined, default: undefined, path: undefined };
+        const next = { ...current, ...definition, value, default: value };
+        if (JSON.stringify(previousDefinition) !== JSON.stringify({ ...next, value: undefined, default: undefined, path: undefined })) structureChanged = true;
+        _lastDump.value[key] = next;
     }
+    if (state.enumLists) {
+        for (const [key, enumList] of Object.entries(state.enumLists)) {
+            if (_lastDump.value[key]) _lastDump.value[key].enumList = enumList;
+        }
+    }
+    if (structureChanged) renderView.call(panel, _lastDump.value);
+    updateLiveDumpAndFields(panel, _livePreviewValues || {});
+    if (state.visibility || state.arrayVisibility) applyDumpVisibility(panel, state.visibility, state.arrayVisibility);
+}
 
+function updateLiveDumpAndFields(panel: PanelThis, liveValues: Record<string, unknown>) {
+    if (!panel.$.view || !_lastDump?.value) return;
+    for (const [key, value] of Object.entries(liveValues)) {
+        if (_ignores.includes(key)) continue;
+        const item = _lastDump.value[key];
+        const element = Array.from(panel.$.view.querySelectorAll('.pts-basic-prop') as NodeListOf<InspectorPropElement>)
+            .find(el => el.dataset.key === key);
+        if (!item || !element || isEditingProperty(panel, element)) continue;
+        populateInspectorValue(item, value);
+        translateDump({ [key]: item });
+        const signature = JSON.stringify(item);
+        if (element.__ptsRenderedSignature === signature) continue;
+        element.dump = item;
+        if (isRuntimeReferenceField(item, value)) renderRuntimeReferenceField(panel, element, item);
+        else {
+            element.render(item);
+            bindUiAssetEvents(element, () => {});
+            bindUiCurveEvents(element, () => {});
+        }
+        element.__ptsRenderedSignature = signature;
+        element.style.display = item.visible === false ? 'none' : '';
+    }
     if (panel.$.jsonDisplay && panel.$.jsonToggle && (panel.$.jsonToggle.value || panel.$.jsonToggle.checked)) {
-        panel.$.jsonDisplay.textContent = JSON.stringify({
-            __type__: _cachedData?.__type__,
-            __value__: liveValues
-        }, null, 4);
+        const text = JSON.stringify({ __type__: _cachedData?.__type__, __value__: liveValues }, null, 4);
+        if (panel.$.jsonDisplay.textContent !== text) panel.$.jsonDisplay.textContent = text;
     }
 }
 
@@ -1050,9 +1314,10 @@ function parseGroup(propDump: any, dumpGroups?: Record<string, any>): GroupInfo 
 }
 
 function translateDump(dump: any, path: string = '') {
-    if (!dump || typeof dump !== 'object') return;
+    if (!dump || typeof dump !== 'object' || isRuntimeReference(dump)) return;
     if (Array.isArray(dump)) {
         dump.forEach((item, index) => {
+            if (isRuntimeReference(item)) return;
             if (item && typeof item === 'object') {
                 item.name = `[${index}]`;
                 item.path = path ? `${path}.${index}` : `${index}`;
@@ -1152,7 +1417,7 @@ async function renderView(this: PanelThis, dumpValue: any) {
     // 1. Populate dump tree with saved values (or fallback to defaults if missing/empty)
     _keys.forEach(_cur => {
         const _item = dumpValue[_cur];
-        populateDumpWithSaved(_item, _val[_cur]);
+        populateInspectorValue(_item, _val[_cur]);
     });
     translateDump(dumpValue, '');
 
@@ -1264,7 +1529,17 @@ async function renderView(this: PanelThis, dumpValue: any) {
         }
     });
 
+    const existingProps = new Map<string, HTMLElement>();
+    if (_isInLivePreviewMode) {
+        this.$.view.querySelectorAll('.pts-basic-prop').forEach((element: HTMLElement) => {
+            if (element.dataset.key) existingProps.set(element.dataset.key, element);
+        });
+    }
     this.$.view.innerHTML = html;
+    this.$.view.querySelectorAll('.pts-basic-prop').forEach((placeholder: HTMLElement) => {
+        const existing = existingProps.get(placeholder.dataset.key || '');
+        if (existing) placeholder.replaceWith(existing);
+    });
 
     // 3. Render dump descriptors into ui-prop elements
     _keys.forEach(_key => {
@@ -1272,7 +1547,12 @@ async function renderView(this: PanelThis, dumpValue: any) {
         const el = this.$.view.querySelector(`.pts-basic-prop[data-key="${_key}"]`) as any;
         if (el) {
             el.dump = _item;
-            el.render(_item);
+            const signature = JSON.stringify(_item);
+            if (el.__ptsRenderedSignature !== signature) {
+                if (isRuntimeReferenceField(_item, _item.value)) renderRuntimeReferenceField(this, el, _item);
+                else el.render(_item);
+                el.__ptsRenderedSignature = signature;
+            }
             if (_key === 'script') {
                 el.setAttribute('readonly', 'true');
                 const uiAsset = el.querySelector('ui-asset');
@@ -1290,6 +1570,8 @@ async function renderView(this: PanelThis, dumpValue: any) {
                 }
             } else if (_item && _item.readonly) {
                 el.setAttribute('readonly', 'true');
+            } else {
+                el.removeAttribute('readonly');
             }
             el.style.display = _item && _item.visible === false ? 'none' : '';
         }
@@ -1365,8 +1647,10 @@ function setupLazyToggle(panel: PanelThis) {
     };
 
     const onLazyToggleChanged = async () => {
-        if (_isInLivePreviewMode) return;
+        if (!isAuthoringSelection(panel)) return;
         if (_isUpdatingUi || !_currentAsset) return;
+        const changedUuid = _currentAsset.uuid;
+        const changedEpoch = _previewObservers.get(panel)?.epoch;
         const newLazy = !!(panel.$.lazyToggle.value || panel.$.lazyToggle.checked);
         if (newLazy === _lastLazyState) return;
         _lastLazyState = newLazy;
@@ -1383,6 +1667,7 @@ function setupLazyToggle(panel: PanelThis) {
 
         try {
             const meta = await Editor.Message.request('asset-db', 'query-asset-meta', _currentAsset.uuid);
+            if (!isAuthoringSelection(panel) || _currentAsset?.uuid !== changedUuid || _previewObservers.get(panel)?.epoch !== changedEpoch) return;
             if (meta) {
                 meta.userData = meta.userData || {};
                 meta.userData.isLazy = newLazy;
@@ -1391,6 +1676,7 @@ function setupLazyToggle(panel: PanelThis) {
                     meta.userData.forceLazy = false;
                 }
                 await Editor.Message.request('asset-db', 'save-asset-meta', _currentAsset.uuid, JSON.stringify(meta));
+                if (!isAuthoringSelection(panel) || _currentAsset?.uuid !== changedUuid || _previewObservers.get(panel)?.epoch !== changedEpoch) return;
                 console.log(`[pTS Inspector] Saved meta isLazy=${newLazy} for ${_currentAsset.displayName}`);
             }
             if (panel.metaList && panel.metaList[0]) {
@@ -1404,6 +1690,7 @@ function setupLazyToggle(panel: PanelThis) {
         } catch (e) {
             console.error('[pTS Inspector] Failed to update meta.userData.isLazy:', e);
         }
+        if (!isAuthoringSelection(panel) || _currentAsset?.uuid !== changedUuid || _previewObservers.get(panel)?.epoch !== changedEpoch) return;
 
         try {
             const report = await Editor.Message.request('pts-asset', 'sync-lazy-prefab');
@@ -1414,8 +1701,10 @@ function setupLazyToggle(panel: PanelThis) {
     };
 
     const onForceLazyToggleChanged = async () => {
-        if (_isInLivePreviewMode) return;
+        if (!isAuthoringSelection(panel)) return;
         if (_isUpdatingUi || !_currentAsset) return;
+        const changedUuid = _currentAsset.uuid;
+        const changedEpoch = _previewObservers.get(panel)?.epoch;
         const newForceLazy = !!(panel.$.forceLazyToggle.value || panel.$.forceLazyToggle.checked);
         if (newForceLazy === _lastForceLazyState) return;
         _lastForceLazyState = newForceLazy;
@@ -1424,11 +1713,13 @@ function setupLazyToggle(panel: PanelThis) {
 
         try {
             const meta = await Editor.Message.request('asset-db', 'query-asset-meta', _currentAsset.uuid);
+            if (!isAuthoringSelection(panel) || _currentAsset?.uuid !== changedUuid || _previewObservers.get(panel)?.epoch !== changedEpoch) return;
             if (meta) {
                 meta.userData = meta.userData || {};
                 meta.userData.isForceLazy = newForceLazy;
                 meta.userData.forceLazy = newForceLazy;
                 await Editor.Message.request('asset-db', 'save-asset-meta', _currentAsset.uuid, JSON.stringify(meta));
+                if (!isAuthoringSelection(panel) || _currentAsset?.uuid !== changedUuid || _previewObservers.get(panel)?.epoch !== changedEpoch) return;
                 console.log(`[pTS Inspector] Saved meta isForceLazy=${newForceLazy} for ${_currentAsset.displayName}`);
             }
             if (panel.metaList && panel.metaList[0]) {
@@ -1439,6 +1730,7 @@ function setupLazyToggle(panel: PanelThis) {
         } catch (e) {
             console.error('[pTS Inspector] Failed to update meta.userData.isForceLazy:', e);
         }
+        if (!isAuthoringSelection(panel) || _currentAsset?.uuid !== changedUuid || _previewObservers.get(panel)?.epoch !== changedEpoch) return;
 
         try {
             const report = await Editor.Message.request('pts-asset', 'sync-lazy-prefab');
@@ -1597,7 +1889,7 @@ function collectValuesForLiveEvaluation(panel: PanelThis): Record<string, any> {
 let _isTickingInProgress = false;
 
 function isPanelFocusedAndActive(panel: PanelThis): boolean {
-    if (_isInLivePreviewMode) return false;
+    if (!isAuthoringSelection(panel)) return false;
     if (!_currentAsset || !_cachedData || !_cachedData.__type__) return false;
     if (!panel || !panel.$.view) return false;
 
@@ -1630,6 +1922,9 @@ function isPanelFocusedAndActive(panel: PanelThis): boolean {
 async function updateLiveGettersAndVisibility(panel: PanelThis) {
     if (_isTickingInProgress || !isPanelFocusedAndActive(panel)) return;
     _isTickingInProgress = true;
+    const observer = _previewObservers.get(panel);
+    const epoch = observer?.epoch;
+    const uuid = _currentAsset?.uuid;
     try {
         const currentValues = collectValuesForLiveEvaluation(panel);
         const result: any = await Editor.Message.request(
@@ -1641,6 +1936,7 @@ async function updateLiveGettersAndVisibility(panel: PanelThis) {
                 args: [_cachedData.__type__, currentValues]
             }
         );
+        if (_isInLivePreviewMode || _currentPanel !== panel || observer?.epoch !== epoch || _currentAsset?.uuid !== uuid) return;
 
         if (!result || result.error) {
             if (result && result.isRuntime) {
@@ -1757,7 +2053,32 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
     this.assetList = assetList;
     this.metaList = metaList;
 
-    if(!this.metaList || this.assetList.length === 0) return;
+    const selectedAsset = this.assetList?.[0];
+    const observer = ensurePreviewObserver(this);
+    if (selectedAsset && observer.uuid === selectedAsset.uuid &&
+        (_isSaving || Date.now() - _lastSaveTime < 800)) return;
+    if (!this.metaList || !selectedAsset || !/\.pts$/i.test(selectedAsset.file || selectedAsset.name || '')) {
+        releasePreviewSelection(this);
+        stopInspectorTicking();
+        _currentAsset = null;
+        _cachedData = null;
+        _lastDump = null;
+        _authoringDump = null;
+        _livePreviewValues = null;
+        setPreviewModeUI(this, false, false);
+        if (this.$.view) this.$.view.innerHTML = '';
+        return;
+    }
+    if (observer.uuid === selectedAsset.uuid && _isInLivePreviewMode) return;
+    releasePreviewSelection(this);
+    const selectionEpoch = observer.epoch;
+    stopInspectorTicking();
+    _lastDump = null;
+    _authoringDump = null;
+    _livePreviewValues = null;
+    _renderedPreviewUI = '';
+    if (this.$.view) this.$.view.innerHTML = '';
+    _currentTriggerAutoSave = null;
 
     setupLazyToggle(this);
 
@@ -1782,10 +2103,6 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
     }
 
     const newAsset = this.assetList[0];
-    if (_isSaving || (Date.now() - _lastSaveTime < 800 && _currentAsset && _currentAsset.uuid === newAsset.uuid)) {
-        console.log("[pTS Inspector] Asset update triggered by recent internal save, skipping reload/re-render.");
-        return;
-    }
 
     _currentAsset = newAsset;
     setSaveButtonDirtyState(false, this);
@@ -1810,8 +2127,11 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
 
     this.$this.style.order = '-1';
 
-    // Trigger onFocusInEditor hook in scene script when asset is focused in Inspector
-    if (_cachedData && _cachedData.__type__) {
+    // Observe before any authoring evaluation. The broker owns preview lifecycle,
+    // including selections made before playback begins.
+    await observePreviewSelection(this, _currentAsset.uuid, _cachedData.__type__ || '');
+    if (observer.epoch !== selectionEpoch || observer.uuid !== selectedAsset.uuid || _currentPanel !== this) return;
+    if (!_isInLivePreviewMode && _cachedData?.__type__) {
         Editor.Message.request('scene', 'execute-scene-script', {
             name: 'pts-core',
             method: 'on_pts_focus',
@@ -1819,86 +2139,10 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         }).catch(() => {});
     }
 
-    // 1. Check if running in Editor Preview Mode
-    const assetName = _currentAsset.displayName ? _currentAsset.displayName.replace(/\.pts$/, '') : (_currentAsset.name || '');
-    let runtimeState: any = null;
-    try {
-        runtimeState = await Editor.Message.request(
-            'pts-asset',
-            'query-preview-data',
-            _currentAsset.uuid,
-            _cachedData.__type__,
-            assetName
-        );
-    } catch (e) {
-        console.warn('[pTS Inspector] Failed to query preview data:', e);
-    }
-
-    // Fallback: check scene script
-    if (!runtimeState || !runtimeState.isPreview) {
-        try {
-            const sceneState = await Editor.Message.request(
-                'scene',
-                'execute-scene-script',
-                {
-                    name: 'pts-core',
-                    method: 'get_pts_runtime_state',
-                    args: [_currentAsset.uuid, _cachedData.__type__]
-                }
-            );
-            if (sceneState && sceneState.isPreview) {
-                runtimeState = sceneState;
-            }
-        } catch {}
-    }
-
-    const isPreview = !!(runtimeState && runtimeState.isPreview);
-    const foundInstance = !!(runtimeState && runtimeState.found);
-
-    if (isPreview && foundInstance && runtimeState.values) {
-        _livePreviewValues = runtimeState.values;
-    } else if (!isPreview) {
-        _livePreviewValues = null;
-    }
-
-    setPreviewModeUI(this, isPreview, foundInstance);
-
-    if (isPreview) {
-        stopInspectorTicking();
-        startPreviewPolling(this);
-    } else {
-        stopPreviewPolling();
-        startInspectorTicking(this);
-    }
-
-    Editor.Message.request(
-        'scene',
-        'execute-scene-script',
-        {
-            name: 'pts-core',
-            method: 'dump',
-            args: [_cachedData.__type__, _cachedData.__value__]
-        }
-    ).then((_out: any) => {
-        console.log("DUMPER OUT: ", _out);
-
-        if(!_out) {
-            console.warn("Dumper returned null or undefined.");
-            return;
-        }
-
-        const _val = _out.value;
-        if(!_val) {
-            console.warn("Dumper output does not contain 'value' property.");
-            return;
-        }
-
-        _lastDump = _out;
-        renderView.call(this, _val);
-    });
+    if (!_isInLivePreviewMode) requestAuthoringDump(this, observer);
 
     const saveAsset = async () => {
-        if (_isInLivePreviewMode) {
+        if (!isAuthoringSelection(panel)) {
             console.warn('[pTS Inspector] Saving is disabled in Live Preview Mode (Read-Only).');
             return;
         }
@@ -1907,6 +2151,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             console.log('[pTS Inspector] Save already in progress, skipping duplicate save.');
             return;
         }
+        const saveEpoch = observer.epoch;
 
         _isSaving = true;
         _lastSaveTime = Date.now();
@@ -1931,6 +2176,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             if (_lastDump && _lastDump.value) {
                 await resolveAllAssetSubtypes(_lastDump.value);
             }
+            if (!isAuthoringSelection(panel) || observer.epoch !== saveEpoch) return;
 
             // Update type if changed in UI
             if (this.$.ptsa && this.$.ptsa.value) {
@@ -2066,6 +2312,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             const content = JSON.stringify(_cachedData, null, 4);
             try {
                 await Editor.Message.request('asset-db', 'save-asset', _currentAsset.uuid, content);
+                if (!isAuthoringSelection(panel) || observer.epoch !== saveEpoch) return;
                 console.log('Asset saved successfully:', _currentAsset.displayName);
                 setSaveButtonDirtyState(false, panel);
                 if (this.$.jsonDisplay) {
@@ -2079,6 +2326,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             try {
                 const depends = extractAssetDependencies(_cachedData);
                 const meta = await Editor.Message.request('asset-db', 'query-asset-meta', _currentAsset.uuid);
+                if (!isAuthoringSelection(panel) || observer.epoch !== saveEpoch) return;
                 if (meta) {
                     meta.userData = meta.userData || {};
                     meta.userData.__type__ = _cachedData.__type__;
@@ -2099,6 +2347,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             } catch (err) {
                 console.error('[pTS Inspector] Failed to save meta dependencies:', err);
             }
+            if (!isAuthoringSelection(panel) || observer.epoch !== saveEpoch) return;
 
             // Re-scan & update _lazy.prefab immediately after writing to disk
             try {
@@ -2115,11 +2364,11 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         }
     };
 
-    let _autoSaveTimer: any = null;
     const triggerAutoSave = async () => {
         if (_isInLivePreviewMode) return;
         try {
             const profile = await Editor.Profile.getProject('pts-asset') as any || {};
+            if (_isInLivePreviewMode || _currentPanel !== panel || observer.epoch !== selectionEpoch) return;
             const isAutoSave = typeof profile.isAutoSave === 'boolean' ? profile.isAutoSave : true;
             if (!isAutoSave) {
                 setSaveButtonDirtyState(true, panel);
@@ -2129,6 +2378,8 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             setSaveButtonDirtyState(false, panel);
             if (_autoSaveTimer) clearTimeout(_autoSaveTimer);
             _autoSaveTimer = setTimeout(async () => {
+                _autoSaveTimer = null;
+                if (!isAuthoringSelection(panel) || observer.epoch !== selectionEpoch) return;
                 await saveAsset();
             }, 300);
         } catch (e) {
@@ -2234,6 +2485,9 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
 
     async function applyPropertyChange(panel: PanelThis, propPath: string, newValue: any) {
         if (!_currentAsset || !_cachedData || !_cachedData.__type__) return;
+        const changeObserver = _previewObservers.get(panel);
+        const changeEpoch = changeObserver?.epoch;
+        const changeUuid = _currentAsset.uuid;
 
         // Check if property is marked readonly
         if (isPropertyReadonly(_lastDump, propPath)) {
@@ -2252,6 +2506,8 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
 
         // Live Preview Mode: ONLY update runtime instance in memory! NEVER write to disk!
         if (_isInLivePreviewMode) {
+            const observer = _previewObservers.get(panel);
+            if (!observer?.state?.found) return;
             console.log(`[pTS Inspector] Live Preview Mode: Applying runtime property change to memory: ${propPath} =`, newValue);
 
             // 1. Update _livePreviewValues in memory
@@ -2280,9 +2536,10 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             }
 
             // Re-render top-level property element to reflect changes across all depths
-            const topPropEl = panel.$.view.querySelector(`.pts-basic-prop[data-key="${topKey}"]`) as any;
+            const topPropEl = panel.$.view.querySelector(`.pts-basic-prop[data-key="${topKey}"]`) as InspectorPropElement | null;
             const topDump = _lastDump?.value?.[topKey];
-            if (topPropEl && topPropEl.render && topDump) {
+            if (topPropEl) topPropEl.__ptsRenderedSignature = undefined;
+            if (topPropEl && topPropEl.render && topDump && !isEditingProperty(panel, topPropEl)) {
                 topPropEl.dump = topDump;
                 topPropEl.render(topDump);
                 bindUiAssetEvents(topPropEl, () => {});
@@ -2290,53 +2547,21 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             }
 
             const info = {
+                observerId: observer.observerId,
+                subscriptionId: observer.subscriptionId,
                 uuid: _currentAsset.uuid,
                 className: _cachedData.__type__,
                 propPath,
                 newValue
             };
 
-            // 3. Send to pts-asset main process -> immediately updates _livePreviewData and broadcasts to PreviewInEditor!
+            // One broker path; authoritative change events reconcile accepted values.
             try {
                 Editor.Message.send('pts-asset', 'set-runtime-property', info);
             } catch (e) {
                 console.warn('[pTS Inspector] Failed to send set-runtime-property to pts-asset:', e);
             }
 
-            // 4. Also notify scene script as fallback (for preview in scene mode)
-            try {
-                Editor.Message.request(
-                    'scene',
-                    'execute-scene-script',
-                    {
-                        name: 'pts-core',
-                        method: 'set_pts_runtime_property',
-                        args: [_currentAsset.uuid, _cachedData.__type__, propPath, newValue]
-                    }
-                ).then((liveResult: any) => {
-                    if (liveResult && liveResult.success) {
-                        if (liveResult.values) {
-                            _livePreviewValues = liveResult.values;
-                        }
-                        if (liveResult.dump && liveResult.dump.value) {
-                            mergeDumpUuids(_lastDump, liveResult.dump);
-                            _lastDump = liveResult.dump;
-                            translateDump(_lastDump.value, '');
-                            const topPropEl = panel.$.view.querySelector(`.pts-basic-prop[data-key="${topKey}"]`) as any;
-                            const topDump = _lastDump?.value?.[topKey];
-                            if (topPropEl && topPropEl.render && topDump) {
-                                topPropEl.dump = topDump;
-                                topPropEl.render(topDump);
-                                bindUiAssetEvents(topPropEl, () => {});
-                                bindUiCurveEvents(topPropEl, () => {});
-                            }
-                        }
-                    }
-                }).catch(() => {});
-            } catch (e) {}
-
-            // 5. Update live getters & visibility
-            updateLiveGettersAndVisibility(panel);
 
             // 6. Update jsonDisplay if open
             if (panel.$.jsonDisplay && panel.$.jsonToggle && (panel.$.jsonToggle.value || panel.$.jsonToggle.checked)) {
@@ -2387,6 +2612,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                     args: [_cachedData.__type__, _cachedData.__value__, propPath, newValue]
                 }
             );
+            if (_isInLivePreviewMode || _currentPanel !== panel || changeObserver?.epoch !== changeEpoch || _currentAsset?.uuid !== changeUuid) return;
 
             if (!changeResult || !changeResult.success) {
                 console.warn('[pTS Inspector] on_pts_property_changed returned error:', changeResult?.error);
@@ -2683,6 +2909,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         try {
             this.$.save.textContent = 'Saving & Syncing...';
             await saveAsset();
+            if (!isAuthoringSelection(panel) || observer.epoch !== selectionEpoch) return;
             setSaveButtonDirtyState(false, panel);
             this.$.save.textContent = 'Saved & Synced! ✔';
             setTimeout(() => {
@@ -2707,11 +2934,12 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
     };
 
     this.$.fix.onclick = async () => {
-        if (_isInLivePreviewMode) {
+        if (!isAuthoringSelection(panel)) {
             console.warn('[pTS Inspector] Fix is disabled in Live Preview Mode.');
             return;
         }
         if (!_currentAsset) return;
+        const fixEpoch = observer.epoch;
 
         console.groupCollapsed("[pTS Inspector] Fixing Asset: ", _currentAsset.displayName);
 
@@ -2744,6 +2972,10 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         } catch (e) {
             console.error("[pTS Inspector] Failed to dump class from scene script:", e);
         }
+        if (!isAuthoringSelection(panel) || observer.epoch !== fixEpoch) {
+            console.groupEnd();
+            return;
+        }
 
         if (!dumpOut || !dumpOut.value) {
             console.warn(`[pTS Inspector] Could not get dump for type "${targetType}". Class might not be loaded in scene.`);
@@ -2760,6 +2992,10 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
 
         // 3.5. Resolve all asset concrete subtypes asynchronously before collecting values
         await resolveAllAssetSubtypes(dumpOut.value);
+        if (!isAuthoringSelection(panel) || observer.epoch !== fixEpoch) {
+            console.groupEnd();
+            return;
+        }
 
         // 4. Extract sanitized and complete values (stripping readonly getters and @editor_property debug props)
         const cleanValues = collectValuesFromDump(dumpOut.value, dumpOut.__getters__, dumpOut.__editor_props__);
@@ -2781,6 +3017,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         const ptsContent = JSON.stringify(_cachedData, null, 4);
         try {
             await Editor.Message.request('asset-db', 'save-asset', _currentAsset.uuid, ptsContent);
+            if (!isAuthoringSelection(panel) || observer.epoch !== fixEpoch) return;
             console.log('[pTS Inspector] Fixed .pts content saved successfully');
             setSaveButtonDirtyState(false, panel);
         } catch (err) {
@@ -2791,6 +3028,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         try {
             const depends = extractAssetDependencies(_cachedData);
             const meta = await Editor.Message.request('asset-db', 'query-asset-meta', _currentAsset.uuid);
+            if (!isAuthoringSelection(panel) || observer.epoch !== fixEpoch) return;
             if (meta) {
                 meta.userData = meta.userData || {};
                 meta.userData.__type__ = targetType;
@@ -2811,6 +3049,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         } catch (err) {
             console.error('[pTS Inspector] Failed to save meta for uuid=' + _currentAsset.uuid, err);
         }
+        if (!isAuthoringSelection(panel) || observer.epoch !== fixEpoch) return;
 
         // Re-scan & update _lazy.prefab after fix
         try {
@@ -2856,6 +3095,8 @@ export function onChange(...ayny: any[]) {
 }
 
 export function ready(this: PanelThis) {
+    const observer = ensurePreviewObserver(this);
+    if (observer.focus) return;
     if (this.$.jsonToggle) {
         this.$.jsonToggle.addEventListener('change', () => {
             if (this.$.jsonDisplay) {
@@ -2866,11 +3107,9 @@ export function ready(this: PanelThis) {
     }
     setupLazyToggle(this);
 
-    // Immediate refresh on click/focus when in preview mode or trigger onFocusInEditor
+    // Focus refresh belongs only to authoring; preview updates are event-driven.
     const triggerFocusInEditor = () => {
-        if (_isInLivePreviewMode) {
-            refreshLiveState(this);
-        } else if (_currentAsset && _cachedData && _cachedData.__type__) {
+        if (isAuthoringSelection(this) && _currentAsset && _cachedData && _cachedData.__type__) {
             if (!_inspectorTickTimer && !_isInLivePreviewMode) {
                 startInspectorTicking(this);
             }
@@ -2881,13 +3120,36 @@ export function ready(this: PanelThis) {
             }).catch(() => {});
         }
     };
+    observer.focus = triggerFocusInEditor;
+    observer.blur = () => {
+        const epoch = observer.epoch;
+        setTimeout(() => {
+            if (observer.epoch === epoch && _currentPanel === this) reconcilePreviewFields(this);
+        }, 0);
+    };
 
     this.$this?.addEventListener('pointerdown', triggerFocusInEditor);
     this.$this?.addEventListener('focusin', triggerFocusInEditor);
+    this.$this?.addEventListener('focusout', observer.blur);
 }
 
 export function close(this: PanelThis) {
-    stopPreviewPolling();
+    releasePreviewSelection(this);
+    const observer = _previewObservers.get(this);
+    if (observer) {
+        Editor.Message.removeBroadcastListener('pts-asset:preview-data-changed', observer.listener);
+        Editor.Message.removeBroadcastListener('pts-asset:runtime-property-result', observer.propertyListener);
+        if (observer.focus) {
+            this.$this?.removeEventListener('pointerdown', observer.focus);
+            this.$this?.removeEventListener('focusin', observer.focus);
+        }
+        if (observer.blur) this.$this?.removeEventListener('focusout', observer.blur);
+        _previewObservers.delete(this);
+    }
+    _authoringDump = null;
+    _livePreviewValues = null;
+    _currentTriggerAutoSave = null;
+    _renderedPreviewUI = '';
     stopInspectorTicking();
     _currentPanel = null;
     _isDirty = false;

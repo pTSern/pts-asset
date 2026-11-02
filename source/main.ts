@@ -240,111 +240,305 @@ export const methods: { [key: string]: (...any: any) => any } = {
         _removeSinglePtsFile(uuid);
     },
 
-    syncPreviewData(data: Record<string, any>) {
-        _lastPreviewHeartbeat = Date.now();
-        if (data && typeof data === 'object') {
-            _livePreviewData = data;
+    previewSession(info: { sessionId: string; running: boolean }) {
+        if (!info || typeof info.sessionId !== 'string' || !info.sessionId || typeof info.running !== 'boolean') return;
+        if (!info.running) {
+            if (_previewSessionId === info.sessionId) _endPreviewSession();
+            return;
+        }
+        if (_previewSessionId === info.sessionId) return;
+        _previewSessionId = info.sessionId;
+        for (const observation of _previewObservations.values()) {
+            observation.subscriptionId = ++_previewSubscriptionId;
+            _publishPreviewState(observation, { isPreview: true, found: false });
+            _sendPreviewObservation(observation);
         }
     },
 
-    queryPreviewData(uuid: string, typeName?: string, assetName?: string) {
-        const isLive = (Date.now() - _lastPreviewHeartbeat) < 2500;
-        if (!isLive || !_livePreviewData) {
-            return { isPreview: false };
-        }
-
-        let foundItem: any = _livePreviewData[uuid];
-        if (!foundItem && assetName) {
-            foundItem = _livePreviewData[assetName];
-        }
-        if (!foundItem && typeName) {
-            foundItem = _livePreviewData[typeName];
-        }
-        if (!foundItem) {
-            for (const k of Object.keys(_livePreviewData)) {
-                const it = _livePreviewData[k];
-                if (it && (
-                    it.uuid === uuid ||
-                    it._uuid === uuid ||
-                    (assetName && it.name === assetName) ||
-                    (typeName && it.name === typeName)
-                )) {
-                    foundItem = it;
-                    break;
-                }
-            }
-        }
-
-        if (foundItem) {
-            return {
-                isPreview: true,
-                found: true,
-                values: foundItem.values || foundItem,
-                editorProps: foundItem.editorProps || {}
+    observePreviewData(info: { observerId: string; uuid: string; className?: string }) {
+        if (!info || typeof info.observerId !== 'string' || !info.observerId ||
+            typeof info.uuid !== 'string' || !info.uuid) return { isPreview: !!_previewSessionId, found: false };
+        const className = typeof info.className === 'string' ? info.className : '';
+        let observation = _previewObservations.get(info.observerId);
+        if (!observation || observation.uuid !== info.uuid || observation.className !== className) {
+            if (observation) _sendPreviewObservation(observation, true);
+            const subscriptionId = ++_previewSubscriptionId;
+            const state = { isPreview: !!_previewSessionId, found: false, subscriptionId };
+            observation = {
+                observerId: info.observerId,
+                uuid: info.uuid,
+                className,
+                subscriptionId,
+                state,
+                fingerprint: JSON.stringify(state),
             };
+            _previewObservations.set(info.observerId, observation);
+            _sendPreviewObservation(observation);
         }
-
-        return {
-            isPreview: true,
-            found: false
-        };
+        if (!_previewSessionId) _requestPreviewSession();
+        return observation.state;
     },
 
-    setRuntimeProperty(info: { uuid: string; className?: string; propPath: string; newValue: any }) {
-        if (!info || !info.uuid) return { success: false, error: 'Missing uuid' };
+    unobservePreviewData(info: { observerId: string }) {
+        const observation = info && _previewObservations.get(info.observerId);
+        if (!observation) return;
+        _sendPreviewObservation(observation, true);
+        _previewObservations.delete(info.observerId);
+    },
 
-        _lastPreviewHeartbeat = Date.now();
-
-        // 1. Immediately update _livePreviewData in main process so queryPreviewData NEVER snaps back
-        if (_livePreviewData) {
-            let found = _livePreviewData[info.uuid];
-            if (!found && info.className) found = _livePreviewData[info.className];
-            if (!found) {
-                for (const k of Object.keys(_livePreviewData)) {
-                    const it = _livePreviewData[k];
-                    if (it && (it.uuid === info.uuid || it._uuid === info.uuid)) {
-                        found = it;
-                        break;
-                    }
-                }
-            }
-            if (found) {
-                const vals = found.values || found;
-                if (vals && typeof vals === 'object') {
-                    const parts = String(info.propPath).split('.');
-                    let cur: any = vals;
-                    for (let i = 0; i < parts.length - 1; i++) {
-                        const p = parts[i];
-                        if (cur[p] === undefined || cur[p] === null) {
-                            cur[p] = !isNaN(Number(parts[i + 1])) ? [] : {};
-                        }
-                        cur = cur[p];
-                    }
-                    const lastKey = parts[parts.length - 1];
-                    let valToAssign = info.newValue;
-                    if (typeof cur[lastKey] === 'number' && typeof valToAssign === 'string' && !isNaN(Number(valToAssign))) {
-                        valToAssign = Number(valToAssign);
-                    }
-                    cur[lastKey] = valToAssign;
+    syncPreviewData(data: unknown) {
+        if (!_previewSessionId || !_isPreviewRecord(data) || data.sessionId !== _previewSessionId ||
+            typeof data.observerId !== 'string' || typeof data.found !== 'boolean') return;
+        const observation = _previewObservations.get(data.observerId);
+        if (!observation || observation.uuid !== data.uuid || observation.subscriptionId !== data.subscriptionId) return;
+        const state: PreviewStateData = { isPreview: true, found: data.found };
+        if (state.found) {
+            if (!_isPreviewValues(data.values) || !_isPreviewValues(data.editorProps)) return;
+            state.values = data.values;
+            state.editorProps = data.editorProps;
+            for (const key of ['dump', 'enumLists', 'visibility', 'arrayVisibility', 'getters', 'arrayGetters'] as const) {
+                if (data[key] !== undefined) {
+                    if (!_isPreviewValue(data[key])) return;
+                    state[key] = data[key];
                 }
             }
         }
+        _publishPreviewState(observation, state);
+    },
 
-        // 2. Broadcast to PreviewInEditor and other renderer processes
-        try {
-            Editor.Message.broadcast('pts-asset:set-runtime-property', info);
-            console.log(`[pts-asset:main] Broadcasted set-runtime-property for ${info.uuid}: ${info.propPath} =`, info.newValue);
-        } catch (e) {
-            console.warn('[pts-asset:main] Failed to broadcast set-runtime-property:', e);
+    setRuntimeProperty(info: { observerId: string; uuid: string; subscriptionId: number; propPath: string; newValue: unknown }) {
+        const observation = info && _previewObservations.get(info.observerId);
+        if (!_previewContents || _previewContents.isDestroyed() || !_previewSessionId || !observation ||
+            observation.uuid !== info.uuid || !observation.state.found || info.subscriptionId !== observation.subscriptionId ||
+            typeof info.propPath !== 'string' || !_isPreviewValue(info.newValue)) {
+            return { success: false, error: 'The selected live instance or property value is no longer available.' };
         }
+        _previewContents.send('pts-asset:set-runtime-property', {
+            ...info,
+            className: observation.className,
+            subscriptionId: observation.subscriptionId,
+            sessionId: _previewSessionId,
+        });
+        return { success: true };
+    },
 
+    runtimePropertyResult(data: unknown) {
+        if (!_previewSessionId || !_isPreviewRecord(data) || data.sessionId !== _previewSessionId ||
+            typeof data.observerId !== 'string' || typeof data.success !== 'boolean') return;
+        const observation = _previewObservations.get(data.observerId);
+        if (!observation || observation.uuid !== data.uuid || observation.subscriptionId !== data.subscriptionId) return;
+        if (typeof data.found === 'boolean') methods.syncPreviewData(data);
+        Editor.Message.broadcast('pts-asset:runtime-property-result', {
+            observerId: observation.observerId,
+            uuid: observation.uuid,
+            subscriptionId: observation.subscriptionId,
+            result: {
+                success: data.success,
+                state: observation.state,
+                ...(typeof data.error === 'string' ? { error: data.error } : {}),
+            },
+        });
+    },
+
+    async locateRuntimeReference(info: { observerId: string; uuid: string; subscriptionId: number; reference: RuntimeReference }) {
+        const observation = info && _previewObservations.get(info.observerId);
+        const reference = info && info.reference;
+        if (!_previewSessionId || !observation || observation.uuid !== info.uuid || !observation.state.found ||
+            info.subscriptionId !== observation.subscriptionId ||
+            !_containsRuntimeReference(observation.state.values, reference)) {
+            return { success: false, error: 'The runtime reference is no longer being inspected.' };
+        }
+        const sessionId = _previewSessionId;
+        const subscriptionId = observation.subscriptionId;
+        const node: unknown = await Editor.Message.request('scene', 'query-node', reference.nodeUuid);
+        if (!node) return { success: false, error: 'The runtime node has been destroyed.' };
+        if (reference.__runtimeReference__ === 'component') {
+            const component: unknown = await Editor.Message.request('scene', 'query-component', reference.uuid);
+            if (_componentOwnerUuid(component) !== reference.nodeUuid) {
+                return { success: false, error: 'The runtime component has been destroyed.' };
+            }
+        }
+        const current = _previewObservations.get(info.observerId);
+        if (_previewSessionId !== sessionId || current?.subscriptionId !== subscriptionId ||
+            !_containsRuntimeReference(current.state.values, reference)) {
+            return { success: false, error: 'The inspected instance changed before navigation completed.' };
+        }
+        Editor.Selection.clear('node');
+        Editor.Selection.select('node', reference.nodeUuid);
+        Editor.Message.send('hierarchy', 'twinkle', reference.nodeUuid);
         return { success: true };
     },
 
 };
 
-let _livePreviewData: Record<string, any> | null = null;
-let _lastPreviewHeartbeat = 0;
+type PreviewValue = string | number | boolean | null | PreviewValue[] | PreviewValues;
+interface PreviewValues { [key: string]: PreviewValue }
+
+interface PreviewStateData {
+    isPreview: boolean;
+    found: boolean;
+    values?: PreviewValues;
+    editorProps?: PreviewValues;
+    dump?: PreviewValue;
+    enumLists?: PreviewValue;
+    visibility?: PreviewValue;
+    arrayVisibility?: PreviewValue;
+    getters?: PreviewValue;
+    arrayGetters?: PreviewValue;
+}
+
+interface PreviewState extends PreviewStateData {
+    subscriptionId: number;
+}
+
+interface PreviewObservation {
+    observerId: string;
+    uuid: string;
+    className: string;
+    subscriptionId: number;
+    state: PreviewState;
+    fingerprint: string;
+}
+
+interface RuntimeReference {
+    __runtimeReference__: 'node' | 'component';
+    uuid: string;
+    nodeUuid: string;
+}
+
+const _previewObservations = new Map<string, PreviewObservation>();
+let _previewSessionId: string | null = null;
+let _previewSubscriptionId = 0;
+
+interface PreviewContents {
+    id: number;
+    getURL(): string;
+    isDestroyed(): boolean;
+    send(channel: string, payload?: unknown): void;
+    once(channel: 'destroyed', listener: () => void): void;
+    removeListener(channel: 'destroyed', listener: () => void): void;
+}
+
+interface PreviewSessionEvent { sender: PreviewContents }
+interface PreviewElectron {
+    ipcMain: {
+        on(channel: string, listener: (event: PreviewSessionEvent, payload: unknown) => void): void;
+        removeListener(channel: string, listener: (event: PreviewSessionEvent, payload: unknown) => void): void;
+    };
+    webContents: { getAllWebContents(): PreviewContents[] };
+}
+
+let _previewElectron: PreviewElectron | null = null;
+let _previewContents: PreviewContents | null = null;
+
+function _isGameView(contents: PreviewContents): boolean {
+    return !contents.isDestroyed() && /[\\/]preload[\\/](?:web|native)[\\/]preview\.js$/i.test(decodeURIComponent(contents.getURL()));
+}
+
+function _requestPreviewSession() {
+    for (const contents of _previewElectron?.webContents.getAllWebContents() || []) {
+        if (_isGameView(contents)) contents.send('pts-asset:request-preview-session');
+    }
+}
+
+function _receivePreviewSession(event: PreviewSessionEvent, value: unknown) {
+    if (!_isGameView(event.sender) || !_isPreviewRecord(value) ||
+        typeof value.sessionId !== 'string' || typeof value.running !== 'boolean') return;
+    if (value.running && _previewContents !== event.sender) {
+        _previewContents?.removeListener('destroyed', _endPreviewSession);
+        _previewContents = event.sender;
+        _previewContents.once('destroyed', _endPreviewSession);
+    }
+    if (_previewContents === event.sender) methods.previewSession({ sessionId: value.sessionId, running: value.running });
+}
+
+function _installPreviewTransport() {
+    // Electron's native IPC targets guest webContents; Creator broadcasts target BrowserWindows instead.
+    const electron = require('electron') as PreviewElectron;
+    _previewElectron = electron;
+    electron.ipcMain.on('pts-asset:preview-session', _receivePreviewSession);
+    _requestPreviewSession();
+}
+
+function _uninstallPreviewTransport() {
+    _previewElectron?.ipcMain.removeListener('pts-asset:preview-session', _receivePreviewSession);
+    _previewContents?.removeListener('destroyed', _endPreviewSession);
+    _previewContents = null;
+    _previewElectron = null;
+}
+
+// Creator 3.8 exposes these listeners at runtime but omits them from its public typings.
+const _previewLifecycleMessage = Editor.Message as typeof Editor.Message & {
+    addBroadcastListener(channel: string, listener: (...args: unknown[]) => void): void;
+    removeBroadcastListener(channel: string, listener: (...args: unknown[]) => void): void;
+};
+
+function _isPreviewRecord(value: unknown): value is Record<string, unknown> {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function _isPreviewValue(value: unknown, depth = 0, seen = new Set<object>()): value is PreviewValue {
+    if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+    if (typeof value === 'number') return Number.isFinite(value);
+    if (typeof value !== 'object' || depth > 20 || seen.has(value)) return false;
+    seen.add(value);
+    const valid = Object.values(value).every(item => _isPreviewValue(item, depth + 1, seen));
+    seen.delete(value);
+    return valid;
+}
+
+function _isPreviewValues(value: unknown): value is PreviewValues {
+    return _isPreviewRecord(value) && _isPreviewValue(value);
+}
+
+function _sendPreviewObservation(observation: PreviewObservation, release = false) {
+    if (!_previewSessionId) return;
+    _previewContents?.send('pts-asset:observe-runtime', {
+        observerId: observation.observerId,
+        uuid: release ? '' : observation.uuid,
+        className: observation.className,
+        subscriptionId: observation.subscriptionId,
+        sessionId: _previewSessionId,
+    });
+}
+
+function _publishPreviewState(observation: PreviewObservation, data: PreviewStateData) {
+    const state = { ...data, subscriptionId: observation.subscriptionId };
+    const fingerprint = JSON.stringify(state);
+    if (observation.fingerprint === fingerprint) return;
+    observation.state = state;
+    observation.fingerprint = fingerprint;
+    Editor.Message.broadcast('pts-asset:preview-data-changed', {
+        observerId: observation.observerId,
+        uuid: observation.uuid,
+        subscriptionId: observation.subscriptionId,
+        state,
+    });
+}
+
+function _endPreviewSession() {
+    _previewSessionId = null;
+    _previewContents?.removeListener('destroyed', _endPreviewSession);
+    _previewContents = null;
+    for (const observation of _previewObservations.values()) {
+        _publishPreviewState(observation, { isPreview: false, found: false });
+    }
+}
+
+function _containsRuntimeReference(value: unknown, reference: RuntimeReference): boolean {
+    if (!reference || !reference.uuid || !reference.nodeUuid ||
+        !['node', 'component'].includes(reference.__runtimeReference__) || !_isPreviewRecord(value) && !Array.isArray(value)) return false;
+    if (_isPreviewRecord(value) && value.__runtimeReference__ === reference.__runtimeReference__ &&
+        value.uuid === reference.uuid && value.nodeUuid === reference.nodeUuid) return true;
+    return Object.values(value).some(item => _containsRuntimeReference(item, reference));
+}
+
+function _componentOwnerUuid(component: unknown): string | null {
+    if (!_isPreviewRecord(component) || !_isPreviewRecord(component.value) ||
+        !_isPreviewRecord(component.value.node) || !_isPreviewRecord(component.value.node.value)) return null;
+    const uuid = component.value.node.value.uuid;
+    return typeof uuid === 'string' ? uuid : null;
+}
 
 /**
  * Patch the library .json for a .pts asset so the runtime deserializer
@@ -1221,6 +1415,8 @@ export async function load() {
     _installIpcHook();
     _hookAssetDbRequireCache();
     _installMessageHook();
+    _previewLifecycleMessage.addBroadcastListener('scene:preview-stop', _endPreviewSession);
+    _installPreviewTransport();
 
     // Warm up pts classes and UUID registry
     try {
@@ -1253,6 +1449,11 @@ export async function load() {
  * @zh 卸载扩展时触发的方法
  */
 export function unload() {
+    _previewLifecycleMessage.removeBroadcastListener('scene:preview-stop', _endPreviewSession);
+    for (const observation of _previewObservations.values()) _sendPreviewObservation(observation, true);
+    _previewObservations.clear();
+    _previewSessionId = null;
+    _uninstallPreviewTransport();
     // These are retained for compatibility with a previously loaded extension
     // instance; they are no-ops when no legacy global hooks were installed.
     _uninstallIpcHook();

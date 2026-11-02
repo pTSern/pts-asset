@@ -271,6 +271,10 @@ function _findAssetByUuid(uuid: string): Asset | null {
     }
 }
 
+if (!BUILD && pConst.EDITOR_ONLY_IN_PREVIEW) {
+    Reflect.set(globalThis, Symbol.for('pTS.preview.lookupLoadedAsset'), _findAssetByUuid);
+}
+
 function _loadAssetByUuid(uuid: string, target?: any, propKey?: string): Promise<Asset | null> {
     if (!uuid) return Promise.resolve(null);
 
@@ -1049,27 +1053,6 @@ function _hydrate(asset: Asset, ptsJson: any): void {
     // Apply immediately so properties are available before Component onLoad/start!
     _applyProperties();
 
-    // Register live asset instance for Editor Preview Mode
-    if (!BUILD && pConst.EDITOR_ONLY_IN_PREVIEW) {
-        const rawUuid = (asset as any)._uuid || asset.uuid;
-        if (rawUuid) {
-            globalThis['__pTS_LIVE_ASSETS__'] = globalThis['__pTS_LIVE_ASSETS__'] || new Map<string, any>();
-            globalThis['__pTS_LIVE_ASSETS__'].set(rawUuid, asset);
-            try {
-                const utils = (assetManager as any)?.utils;
-                if (utils) {
-                    if (typeof utils.decodeUuid === 'function') {
-                        const dec = utils.decodeUuid(rawUuid);
-                        if (dec) globalThis['__pTS_LIVE_ASSETS__'].set(dec, asset);
-                    }
-                    if (typeof utils.compressUuid === 'function') {
-                        const comp = utils.compressUuid(rawUuid);
-                        if (comp) globalThis['__pTS_LIVE_ASSETS__'].set(comp, asset);
-                    }
-                }
-            } catch {}
-        }
-    }
 }
 
 // ─── 8. Pipeline Hook: Intercept Loaded Assets (.pts native or embedded json) ───
