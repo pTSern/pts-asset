@@ -10,6 +10,7 @@
         "build": "tsc",
         "test:preview-subscriptions": "node ./scripts/test-preview-subscriptions.js",
         "test:query-isolation": "node ./scripts/test-query-isolation.js",
+        "test:script-code-display": "node ./scripts/test-script-code-display.js",
         "watch": "tsc -w"
     },
     "description": "i18n:pts-asset.description",

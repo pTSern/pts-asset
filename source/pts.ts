@@ -47,9 +47,10 @@ import {
 } from './pts-fixer';
 
 export { extractAssetDependencies, extractDumpValue, collectValuesFromDump, populateDumpWithSaved, isEnumType, isEditorPropItem };
-import { getScriptUuidForClass } from './inheritance';
+import { getScriptUuidForClass, getScriptPathForClass } from './inheritance';
 import { AssetInfo } from '@cocos/creator-types/editor/packages/asset-db/@types/public'
 import fs from 'fs'
+import path from 'path';
 interface Asset {
     displayName: string;
     file: string;
@@ -101,6 +102,9 @@ export const $ = {
     forceLazyToggle: "#force-lazy-toggle",
     jsonToggle: "#json-toggle",
     jsonDisplay: "#json-display",
+    scriptToggle: "#script-toggle",
+    scriptDisplay: "#script-display",
+    scriptCodeBlock: "#script-code-block",
     previewBanner: "#preview-banner",
     previewStatusText: "#preview-status-text",
     previewSubText: "#preview-sub-text",
@@ -160,6 +164,23 @@ ui-section.pts-group-section > ui-label[slot="header"] {
 #save-button.dirty:hover {
     filter: brightness(1.25) !important;
     box-shadow: 0 0 16px 5px rgba(255, 152, 0, 1) !important;
+}
+
+.pts-code-block {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+    gap: 6px;
+}
+
+#json-display,
+#script-display {
+    display: block;
+    flex: 1 1 auto;
+    min-height: 60px;
+    max-height: 240px;
+    overflow: auto;
 }
 `;
 
@@ -274,7 +295,8 @@ export const template = `
             gap: 6px;
         }
 
-        #json-display {
+        #json-display,
+        #script-display {
             display: block;
             flex: 1 1 auto;
             min-height: 60px;
@@ -342,8 +364,12 @@ export const template = `
     <div class="pts-footer">
         <ui-button id="logger-button" title="console.log this runtime instance to the browser console">📋 Logger</ui-button>
         <div class="pts-code-block">
-            <ui-checkbox id="json-toggle" checked>Show Code</ui-checkbox>
+            <ui-checkbox id="json-toggle" checked>Show Code (File)</ui-checkbox>
             <ui-code id="json-display" language="json"></ui-code>
+        </div>
+        <div class="pts-code-block" id="script-code-block">
+            <ui-checkbox id="script-toggle" checked>Show Code (Script)</ui-checkbox>
+            <ui-code id="script-display" language="typescript"></ui-code>
         </div>
     </div>
 </div>
@@ -1748,8 +1774,106 @@ async function renderView(this: PanelThis, dumpValue: any) {
             this.$.jsonDisplay.textContent = _fileContent;
         }
     }
+
+    if (this.$.scriptDisplay) {
+        await updateScriptDisplayContent.call(this, currentClassName, scriptUuid);
+    }
 }
 
+const _scriptSearchCache = new Map<string, string>();
+
+function scanDirForTsClass(dir: string, className: string): string | null {
+    if (!fs.existsSync(dir)) return null;
+    try {
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        for (const entry of entries) {
+            if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'dist' || entry.name === 'bin') continue;
+            const fullPath = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+                const sub = scanDirForTsClass(fullPath, className);
+                if (sub) return sub;
+            } else if (entry.isFile() && entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts')) {
+                const text = fs.readFileSync(fullPath, 'utf8');
+                if (text.includes(className)) {
+                    return fullPath;
+                }
+            }
+        }
+    } catch {}
+    return null;
+}
+
+function findScriptFileFallback(className: string): string | null {
+    if (!className) return null;
+    if (_scriptSearchCache.has(className)) {
+        const cached = _scriptSearchCache.get(className);
+        if (cached && fs.existsSync(cached)) return cached;
+    }
+
+    const projectPath = typeof Editor !== 'undefined' && Editor.Project && Editor.Project.path
+        ? Editor.Project.path
+        : path.resolve(__dirname, '../../..');
+
+    const searchDirs = [
+        path.resolve(projectPath, 'assets'),
+        path.resolve(projectPath, 'extensions/pts-core/assets'),
+        path.resolve(projectPath, 'extensions/pts-asset/assets')
+    ];
+
+    for (const dir of searchDirs) {
+        const found = scanDirForTsClass(dir, className);
+        if (found) {
+            _scriptSearchCache.set(className, found);
+            return found;
+        }
+    }
+    return null;
+}
+
+async function updateScriptDisplayContent(this: PanelThis, className?: string, scriptUuid?: string): Promise<void> {
+    if (!this.$.scriptDisplay) return;
+
+    if (!className) {
+        this.$.scriptDisplay.textContent = '// No pTS asset class specified.';
+        return;
+    }
+
+    try {
+        let scriptPath = getScriptPathForClass(className);
+
+        // 1. Try resolving via scriptUuid through asset-db if not found directly
+        if (!scriptPath || !fs.existsSync(scriptPath)) {
+            const uuid = scriptUuid || getScriptUuidForClass(className);
+            if (uuid && typeof Editor !== 'undefined' && Editor.Message) {
+                try {
+                    const info = await Editor.Message.request('asset-db', 'query-asset-info', uuid) as { file?: string } | null;
+                    if (info && info.file && fs.existsSync(info.file)) {
+                        scriptPath = info.file;
+                    }
+                } catch {}
+            }
+        }
+
+        // 2. Fallback: Search in project directories
+        if (!scriptPath || !fs.existsSync(scriptPath)) {
+            scriptPath = findScriptFileFallback(className) || undefined;
+        }
+
+        if (scriptPath && fs.existsSync(scriptPath)) {
+            const code = fs.readFileSync(scriptPath, 'utf8');
+            this.$.scriptDisplay.textContent = code;
+            if (this.$.scriptToggle) {
+                this.$.scriptToggle.setAttribute('title', path.basename(scriptPath));
+            }
+            return;
+        }
+
+        this.$.scriptDisplay.textContent = `// TypeScript source file not found for class: ${className}`;
+    } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.$.scriptDisplay.textContent = `// Error loading script source for ${className}: ${message}`;
+    }
+}
 function setupLazyToggle(panel: PanelThis) {
     if (!panel.$.lazyToggle || panel.$.lazyToggle.__pts_bound__) return;
     panel.$.lazyToggle.__pts_bound__ = true;
@@ -2181,6 +2305,8 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         _livePreviewValues = null;
         setPreviewModeUI(this, false, false);
         if (this.$.view) this.$.view.innerHTML = '';
+        if (this.$.jsonDisplay) this.$.jsonDisplay.textContent = '';
+        if (this.$.scriptDisplay) this.$.scriptDisplay.textContent = '';
         return;
     }
     if (observer.uuid === selectedAsset.uuid && _isInLivePreviewMode) return;
@@ -2233,6 +2359,11 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
     if (this.$.jsonDisplay && this.$.jsonToggle) {
         const show = !!(this.$.jsonToggle.value || this.$.jsonToggle.checked);
         this.$.jsonDisplay.style.display = show ? 'block' : 'none';
+    }
+
+    if (this.$.scriptDisplay && this.$.scriptToggle) {
+        const show = !!(this.$.scriptToggle.value || this.$.scriptToggle.checked);
+        this.$.scriptDisplay.style.display = show ? 'block' : 'none';
     }
 
     if (this.$.ptsa) {
@@ -3013,6 +3144,9 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                         (uiAsset as any).value = newUuid;
                     }
                 }
+                if (this.$.scriptDisplay) {
+                    void updateScriptDisplayContent.call(this, newType, newUuid);
+                }
             }
             triggerAutoSave();
         };
@@ -3234,6 +3368,14 @@ export function ready(this: PanelThis) {
             if (this.$.jsonDisplay) {
                 const show = !!(this.$.jsonToggle.value || this.$.jsonToggle.checked);
                 this.$.jsonDisplay.style.display = show ? 'block' : 'none';
+            }
+        });
+    }
+    if (this.$.scriptToggle) {
+        this.$.scriptToggle.addEventListener('change', () => {
+            if (this.$.scriptDisplay) {
+                const show = !!(this.$.scriptToggle.value || this.$.scriptToggle.checked);
+                this.$.scriptDisplay.style.display = show ? 'block' : 'none';
             }
         });
     }
