@@ -20,6 +20,8 @@ export class pTSAsset_Range extends pTSAsset_Number {
             this.min = this.max;
             this.max = _min;
         }
+        if(this.data < this.min) this.data = this.min;
+        if(this.data > this.max) this.data = this.max;
     }
 
     protected _add(old: number, value: number): number {
