@@ -190,13 +190,19 @@ export function isAssetType(dump: any): boolean {
     if (!dump || dump.isArray) return false;
     if (isNodeOrComponent(dump)) return false;
     if (isEnumType(dump)) return false;
+    if (isNestedDump(dump.value)) return false;
+    if (isRealCurve(dump) || isGradient(dump) || isValueType(dump)) return false;
     if (dump.type === 'String' || dump.type === 'Number' || dump.type === 'Integer' || dump.type === 'Float' || dump.type === 'Boolean') return false;
     if (dump.actualType === 'String' || dump.actualType === 'Number' || dump.actualType === 'Integer' || dump.actualType === 'Float' || dump.actualType === 'Boolean') return false;
     if (dump.actualType === 'Enum') return false;
     if (dump.extends?.includes('cc.Asset') || dump.type === 'cc.Asset') return true;
+    if (Array.isArray(dump.extends) && dump.extends.length > 0 && !dump.extends.some((e: string) => e.includes('Asset'))) return false;
+    if (dump.value && typeof dump.value === 'object' && !Array.isArray(dump.value) && !('uuid' in dump.value) && !('_uuid' in dump.value)) {
+        return false;
+    }
     if (dump.actualType && dump.actualType !== 'cc.Asset' && dump.actualType !== 'pTSAsset' && dump.actualType !== 'Enum') {
         if (dump.extends?.some((e: string) => e.includes('Asset'))) return true;
-        if (dump.actualType.endsWith('Asset') || dump.actualType.startsWith('pTSAsset') || dump.actualType.includes('SpriteFrame') || dump.actualType.includes('Texture') || dump.actualType.includes('Prefab')) return true;
+        if (!dump.actualType.includes('.') && (dump.actualType.endsWith('Asset') || dump.actualType.startsWith('pTSAsset') || dump.actualType.includes('SpriteFrame') || dump.actualType.includes('Texture') || dump.actualType.includes('Prefab'))) return true;
         return false;
     }
     if (dump.value && typeof dump.value === 'object' && ('uuid' in dump.value || '_uuid' in dump.value)) {

@@ -1,3 +1,4 @@
+import './cache-bust';
 
 interface _IBase {
     name: string
@@ -1414,6 +1415,55 @@ function bindUiCurveEvents(root: Element | DocumentFragment | null, onTrigger: (
     });
 }
 
+function collectAllUiSelects(root: Element | DocumentFragment | null): HTMLElement[] {
+    if (!root) return [];
+    const results: HTMLElement[] = [];
+    const walk = (node: Element | DocumentFragment) => {
+        if (!node) return;
+        const tag = (node as HTMLElement).tagName;
+        if (tag === 'UI-SELECT' || tag === 'UI-SELECT-PRO' || tag === 'UI-RADIO-GROUP') {
+            results.push(node as HTMLElement);
+        }
+        if (node.children) {
+            for (let i = 0; i < node.children.length; i++) {
+                const child = node.children[i];
+                walk(child);
+                if (child.shadowRoot) {
+                    walk(child.shadowRoot);
+                }
+            }
+        }
+    };
+    walk(root);
+    return results;
+}
+
+function syncUiSelectToDump(uiSelect: HTMLElement, rootDump: any = _lastDump): boolean {
+    if (!uiSelect || !rootDump || !rootDump.value) return false;
+    const closestUiProp = uiSelect.closest('ui-prop') as any;
+    const dump = closestUiProp?.dump;
+    if (!dump || !isEnumType(dump)) return false;
+
+    const rawVal = (uiSelect as any).value;
+    if (rawVal === undefined || rawVal === null || rawVal === '') return false;
+
+    let finalVal = rawVal;
+    if (Array.isArray(dump.enumList) && dump.enumList.length > 0) {
+        const matched = dump.enumList.find((opt: any) => opt.value === rawVal || String(opt.value) === String(rawVal));
+        if (!matched) return false;
+        finalVal = matched.value;
+    }
+
+    dump.value = finalVal;
+    if (dump.path) {
+        const nodeInRoot = findDumpNodeByPath(rootDump, dump.path);
+        if (nodeInRoot && isEnumType(nodeInRoot)) {
+            nodeInRoot.value = finalVal;
+        }
+    }
+    return true;
+}
+
 interface GroupInfo {
     id: string;
     name: string;
@@ -1730,31 +1780,33 @@ async function renderView(this: PanelThis, dumpValue: any) {
         if (_currentTriggerAutoSave) _currentTriggerAutoSave();
     });
 
-    if (!(this.$.view as any).__pts_delegated__) {
-        (this.$.view as any).__pts_delegated__ = true;
-        const handleAssetChange = (e: Event) => {
-            const target = (e.composedPath ? e.composedPath()[0] : e.target) as HTMLElement;
-            const assetEl = target?.closest('ui-asset') as HTMLElement;
-            if (assetEl) {
-                const basicProp = assetEl.closest('.pts-basic-prop') as HTMLElement;
-                if (basicProp && basicProp.dataset.key === 'script') {
-                    return;
-                }
-                console.log(`[pTS Inspector] Delegated ui-asset event (${e.type}), new value:`, (assetEl as any).value);
-                syncUiAssetToDump(assetEl, _lastDump);
-                if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+    const handleAssetChange = (e: Event) => {
+        const target = (e.composedPath ? e.composedPath()[0] : e.target) as HTMLElement;
+        const assetEl = target?.closest('ui-asset') as HTMLElement;
+        if (assetEl) {
+            const basicProp = assetEl.closest('.pts-basic-prop') as HTMLElement;
+            if (basicProp && basicProp.dataset.key === 'script') {
                 return;
             }
+            console.log(`[pTS Inspector] Delegated ui-asset event (${e.type}), new value:`, (assetEl as any).value);
+            syncUiAssetToDump(assetEl, _lastDump);
+            if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+            return;
+        }
 
-            const curveEl = target?.closest('ui-curve') as HTMLElement;
-            if (curveEl) {
-                console.log(`[pTS Inspector] Delegated ui-curve event (${e.type}), new value:`, (curveEl as any).value);
-                syncUiCurveToDump(curveEl, _lastDump);
-                if (_currentTriggerAutoSave) _currentTriggerAutoSave();
-            }
-        };
-        this.$.view.addEventListener('change', handleAssetChange, true);
-        this.$.view.addEventListener('confirm', handleAssetChange, true);
+        const curveEl = target?.closest('ui-curve') as HTMLElement;
+        if (curveEl) {
+            console.log(`[pTS Inspector] Delegated ui-curve event (${e.type}), new value:`, (curveEl as any).value);
+            syncUiCurveToDump(curveEl, _lastDump);
+            if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+        }
+    };
+    (this.$.view as any).__pts_delegated_fn__ = handleAssetChange;
+    if (!(this.$.view as any).__pts_delegated__) {
+        (this.$.view as any).__pts_delegated__ = true;
+        const proxyAssetChange = (e: Event) => (this.$.view as any).__pts_delegated_fn__?.(e);
+        this.$.view.addEventListener('change', proxyAssetChange, true);
+        this.$.view.addEventListener('confirm', proxyAssetChange, true);
     }
 
     // 6. Update group visibility based on child property visibility
@@ -1999,8 +2051,12 @@ function findAssetElement(path: any[]): HTMLElement | null {
             if (!node.classList.contains('pts-basic-prop')) return node;
         }
         if (tag !== 'UI-PROP' && tag !== 'CC-PROP' && node.getAttribute && (node.getAttribute('type') === 'cc.Asset' || node.getAttribute('droppable') === 'cc.Asset')) return node;
-        const dump = node.dump;
-        if (dump && !dump.isArray && isAssetType(dump)) return node;
+        if (tag === 'UI-PROP' || tag === 'CC-PROP') {
+            const dump = node.dump;
+            if (dump && !dump.isArray) {
+                return isAssetType(dump) ? node : null;
+            }
+        }
     }
     return null;
 }
@@ -2010,10 +2066,14 @@ function findEnumElement(path: any[]): HTMLElement | null {
     for (const node of path) {
         if (!node || !node.tagName) continue;
         const tag = node.tagName.toUpperCase();
-        if (tag === 'UI-SELECT' || tag === 'UI-SELECT-PRO' || tag === 'SELECT') return node;
+        if (tag === 'UI-SELECT' || tag === 'UI-SELECT-PRO' || tag === 'SELECT' || tag === 'UI-RADIO-GROUP') return node;
         if (node.classList && (node.classList.contains('ui-select') || node.classList.contains('cc-enum') || node.classList.contains('enum'))) return node;
-        const dump = node.dump;
-        if (dump && (dump.type === 'Enum' || dump.type === 'cc.Enum' || isEnumType(dump))) return node;
+        if (tag === 'UI-PROP' || tag === 'CC-PROP') {
+            const dump = node.dump;
+            if (dump && !dump.isArray) {
+                return (dump.type === 'Enum' || dump.type === 'cc.Enum' || isEnumType(dump)) ? node : null;
+            }
+        }
     }
     return null;
 }
@@ -2025,8 +2085,12 @@ function findBooleanElement(path: any[]): HTMLElement | null {
         const tag = node.tagName.toUpperCase();
         if (tag === 'UI-CHECKBOX' || (tag === 'INPUT' && (node as HTMLInputElement).type === 'checkbox')) return node;
         if (node.classList && (node.classList.contains('ui-checkbox') || node.classList.contains('cc-checkbox'))) return node;
-        const dump = node.dump;
-        if (dump && dump.type === 'Boolean') return node;
+        if (tag === 'UI-PROP' || tag === 'CC-PROP') {
+            const dump = node.dump;
+            if (dump && !dump.isArray) {
+                return dump.type === 'Boolean' ? node : null;
+            }
+        }
     }
     return null;
 }
@@ -2038,8 +2102,12 @@ function findCurveElement(path: any[]): HTMLElement | null {
         const tag = node.tagName.toUpperCase();
         if (tag === 'UI-CURVE' || tag === 'UI-SECTION-CURVE' || tag === 'CURVE-EDITOR') return node;
         if (node.classList && (node.classList.contains('ui-curve') || node.classList.contains('curve-editor'))) return node;
-        const dump = node.dump;
-        if (dump && (dump.type === 'RealCurve' || dump.type === 'cc.RealCurve' || isRealCurve(dump))) return node;
+        if (tag === 'UI-PROP' || tag === 'CC-PROP') {
+            const dump = node.dump;
+            if (dump && !dump.isArray) {
+                return (dump.type === 'RealCurve' || dump.type === 'cc.RealCurve' || isRealCurve(dump)) ? node : null;
+            }
+        }
     }
     return null;
 }
@@ -2417,6 +2485,15 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 syncUiCurveToDump(curveEl, _lastDump);
             }
 
+            // Pre-save sweep: sync all ui-select enum elements in DOM into _lastDump
+            if (_lastDump && _lastDump.value) {
+                translateDump(_lastDump.value, '');
+            }
+            const uiSelects = collectAllUiSelects(this.$.view);
+            for (const selectEl of uiSelects) {
+                syncUiSelectToDump(selectEl, _lastDump);
+            }
+
             // Pre-save sweep: resolve all asset concrete subtypes
             if (_lastDump && _lastDump.value) {
                 await resolveAllAssetSubtypes(_lastDump.value);
@@ -2437,7 +2514,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             this.$.view.querySelectorAll('.pts-basic-prop').forEach((el: any) => {
                 const key = el.dataset.key;
                 if (key === 'script') return;
-                const dump = el.dump || (_lastDump?.value && _lastDump.value[key]);
+                const dump = (_lastDump?.value && _lastDump.value[key]) || el.dump;
                 if (dump) {
                     const propName = dump.name || key;
                     if (propName === 'script' || propName === '__scriptAsset' || isEditorPropItem(dump, propName, _lastDump?.__editor_props__)) {
@@ -2639,6 +2716,10 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         const target = (e.target as HTMLElement) || (path && path[0]);
         if (!target) return null;
 
+        if (_lastDump && _lastDump.value) {
+            translateDump(_lastDump.value, '');
+        }
+
         let newValue: any = undefined;
 
         const assetEl = findAssetElement(path);
@@ -2654,6 +2735,9 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 ? enumEl
                 : (enumEl.querySelector('ui-select, ui-select-pro, select, ui-radio-group') as HTMLElement || enumEl);
             newValue = (uiSelect as any).value;
+            if ((newValue === undefined || newValue === '') && e.detail && e.detail.value !== undefined) {
+                newValue = e.detail.value;
+            }
             if ((newValue === undefined || newValue === '') && (enumEl as any).dump?.value !== undefined) {
                 newValue = (enumEl as any).dump.value;
             }
@@ -2702,6 +2786,9 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                                 const newElem = JSON.parse(JSON.stringify(dump.elementTypeData || {}));
                                 newElem.name = `[${dump.value.length}]`;
                                 newElem.path = `${dump.path}.${dump.value.length}`;
+                                if (newElem.value && typeof newElem.value === 'object') {
+                                    translateDump(newElem.value, newElem.path);
+                                }
                                 dump.value.push(newElem);
                             }
                             if (dump.value.length > parsed) {
@@ -2709,6 +2796,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                             }
                         }
                     }
+                    translateDump(dump.value, dump.path);
                     return { propPath: dump.path, newValue: extractDumpValue(dump) };
                 }
 
@@ -2725,6 +2813,9 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                     newValue = dump.value;
                 }
                 newValue = coerceEnumValue(dump, newValue);
+                if (isEnumType(dump) && newValue !== undefined) {
+                    dump.value = newValue;
+                }
                 return { propPath: dump.path, newValue };
             }
         }
@@ -2737,6 +2828,9 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 newValue = normalizeCurveValue(newValue !== undefined ? newValue : propDump.value);
             } else if (propDump) {
                 newValue = coerceEnumValue(propDump, newValue);
+                if (isEnumType(propDump) && newValue !== undefined) {
+                    propDump.value = newValue;
+                }
             }
             return { propPath: basicProp.dataset.key, newValue };
         }
@@ -2971,180 +3065,195 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         }
     }
 
-    // Attach capture-phase listeners on view once to intercept all change/confirm/keydown/drop events
+    // Update capture-phase handler references on every update() call so hot-reloads & asset switches never use stale closures
+    const handleChangeEvent = async (e: any) => {
+        const path = e.composedPath ? e.composedPath() : [e.target];
+
+        // Asset change: save immediately
+        const assetEl = findAssetElement(path);
+        if (assetEl) {
+            if (e.type === 'change-dump') return;
+            console.log(`[pTS Inspector] Asset change detected on <${assetEl.tagName}>`);
+            const uiAsset = (assetEl.tagName === 'UI-ASSET' ? assetEl : assetEl.querySelector('ui-asset')) as HTMLElement || assetEl;
+            syncUiAssetToDump(uiAsset, _lastDump);
+            const changeInfo = resolveChangeFromEvent(e);
+            if (changeInfo) {
+                await applyPropertyChange(panel, changeInfo.propPath, changeInfo.newValue);
+            } else if (_currentTriggerAutoSave) {
+                _currentTriggerAutoSave();
+            }
+            return;
+        }
+
+        // Enum change: apply change immediately and invoke setter
+        const enumEl = findEnumElement(path);
+        if (enumEl) {
+            if (e.type === 'change-dump') return;
+            console.log(`[pTS Inspector] Enum change detected on <${enumEl.tagName}>`);
+            const changeInfo = resolveChangeFromEvent(e);
+            if (changeInfo) {
+                await applyPropertyChange(panel, changeInfo.propPath, changeInfo.newValue);
+            } else {
+                if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                updateLiveGettersAndVisibility(panel);
+            }
+            return;
+        }
+
+        // Boolean toggle: apply change immediately and invoke setter
+        const boolEl = findBooleanElement(path);
+        if (boolEl) {
+            if (e.type === 'change-dump') return;
+            console.log(`[pTS Inspector] Boolean toggle detected on <${boolEl.tagName}>`);
+            const changeInfo = resolveChangeFromEvent(e);
+            if (changeInfo) {
+                await applyPropertyChange(panel, changeInfo.propPath, changeInfo.newValue);
+            } else {
+                if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                updateLiveGettersAndVisibility(panel);
+            }
+            return;
+        }
+
+        // Curve change: apply change immediately
+        const curveEl = findCurveElement(path);
+        if (curveEl) {
+            if (e.type === 'change-dump') return;
+            console.log(`[pTS Inspector] Curve change detected on <${curveEl.tagName}>`);
+            const uiCurve = (curveEl.tagName === 'UI-CURVE' ? curveEl : curveEl.querySelector('ui-curve')) as HTMLElement || curveEl;
+            syncUiCurveToDump(uiCurve, _lastDump);
+            const changeInfo = resolveChangeFromEvent(e);
+            if (changeInfo) {
+                await applyPropertyChange(panel, changeInfo.propPath, changeInfo.newValue);
+            } else if (_currentTriggerAutoSave) {
+                _currentTriggerAutoSave();
+            }
+            return;
+        }
+
+        // Primary property (cc-prop / ui-input / ui-num-input):
+        // Rule: "if the target value changed is primary ( cc-prop ), then only save if user hit enter"
+        if (isPrimaryInput(path)) {
+            console.log(`[pTS Inspector] Primary property change event ignored (requires Enter key to save).`);
+            return;
+        }
+
+        // Fallback for any other non-primary controls
+        const changeInfo = resolveChangeFromEvent(e);
+        if (changeInfo) {
+            await applyPropertyChange(panel, changeInfo.propPath, changeInfo.newValue);
+        } else {
+            if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+            updateLiveGettersAndVisibility(panel);
+        }
+    };
+
+    const handleConfirmEvent = async (e: any) => {
+        const path = e.composedPath ? e.composedPath() : [e.target];
+
+        // <ui-select> and <ui-checkbox> dispatch 'change' immediately before 'confirm'; skip duplicate confirm handling
+        if (findEnumElement(path) || findBooleanElement(path)) {
+            return;
+        }
+
+        const assetEl = findAssetElement(path);
+        if (assetEl) {
+            const uiAsset = (assetEl.tagName === 'UI-ASSET' ? assetEl : assetEl.querySelector('ui-asset')) as HTMLElement || assetEl;
+            syncUiAssetToDump(uiAsset, _lastDump);
+        }
+
+        const curveEl = findCurveElement(path);
+        if (curveEl) {
+            const uiCurve = (curveEl.tagName === 'UI-CURVE' ? curveEl : curveEl.querySelector('ui-curve')) as HTMLElement || curveEl;
+            syncUiCurveToDump(uiCurve, _lastDump);
+        }
+
+        console.log(`[pTS Inspector] Confirm event (Enter/select) -> triggering change.`);
+        const changeInfo = resolveChangeFromEvent(e);
+        if (changeInfo) {
+            await applyPropertyChange(panel, changeInfo.propPath, changeInfo.newValue);
+        } else {
+            if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+            updateLiveGettersAndVisibility(panel);
+        }
+    };
+
+    const handleKeydownEvent = async (e: KeyboardEvent) => {
+        if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
+            e.preventDefault();
+            e.stopPropagation();
+            panel.$.save?.click();
+            return;
+        }
+        if (e.key === 'Enter') {
+            const path = e.composedPath ? e.composedPath() : [e.target];
+
+            const assetEl = findAssetElement(path);
+            if (assetEl) {
+                const uiAsset = (assetEl.tagName === 'UI-ASSET' ? assetEl : assetEl.querySelector('ui-asset')) as HTMLElement || assetEl;
+                syncUiAssetToDump(uiAsset, _lastDump);
+            }
+
+            const curveEl = findCurveElement(path);
+            if (curveEl) {
+                const uiCurve = (curveEl.tagName === 'UI-CURVE' ? curveEl : curveEl.querySelector('ui-curve')) as HTMLElement || curveEl;
+                syncUiCurveToDump(uiCurve, _lastDump);
+            }
+
+            console.log(`[pTS Inspector] Enter key hit on primary field -> triggering change.`);
+            const changeInfo = resolveChangeFromEvent(e);
+            if (changeInfo) {
+                await applyPropertyChange(panel, changeInfo.propPath, changeInfo.newValue);
+            } else {
+                if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                updateLiveGettersAndVisibility(panel);
+            }
+        }
+    };
+
+    const handleDropEvent = (e: Event) => {
+        setTimeout(async () => {
+            const path = e.composedPath ? e.composedPath() : [e.target];
+            const assetEl = findAssetElement(path);
+            if (assetEl) {
+                const uiAsset = (assetEl.tagName === 'UI-ASSET' ? assetEl : assetEl.querySelector('ui-asset')) as HTMLElement || assetEl;
+                syncUiAssetToDump(uiAsset, _lastDump);
+            }
+            const curveEl = findCurveElement(path);
+            if (curveEl) {
+                const uiCurve = (curveEl.tagName === 'UI-CURVE' ? curveEl : curveEl.querySelector('ui-curve')) as HTMLElement || curveEl;
+                syncUiCurveToDump(uiCurve, _lastDump);
+            }
+            const changeInfo = resolveChangeFromEvent(e);
+            if (changeInfo) {
+                await applyPropertyChange(panel, changeInfo.propPath, changeInfo.newValue);
+            } else {
+                if (_currentTriggerAutoSave) _currentTriggerAutoSave();
+                updateLiveGettersAndVisibility(panel);
+            }
+        }, 30);
+    };
+
+    (this.$.view as any).__pts_handlers__ = {
+        onChange: handleChangeEvent,
+        onConfirm: handleConfirmEvent,
+        onKeydown: handleKeydownEvent,
+        onDrop: handleDropEvent,
+    };
+
     if (!this.$.view.__pts_captured__) {
         this.$.view.__pts_captured__ = true;
+        const proxyChange = (e: any) => (this.$.view as any).__pts_handlers__?.onChange?.(e);
+        const proxyConfirm = (e: any) => (this.$.view as any).__pts_handlers__?.onConfirm?.(e);
+        const proxyKeydown = (e: KeyboardEvent) => (this.$.view as any).__pts_handlers__?.onKeydown?.(e);
+        const proxyDrop = (e: Event) => (this.$.view as any).__pts_handlers__?.onDrop?.(e);
 
-        // 1. CHANGE event:
-        const handleChangeEvent = async (e: any) => {
-            const path = e.composedPath ? e.composedPath() : [e.target];
-
-            // Asset change: save immediately
-            const assetEl = findAssetElement(path);
-            if (assetEl) {
-                console.log(`[pTS Inspector] Asset change detected on <${assetEl.tagName}>`);
-                const uiAsset = (assetEl.tagName === 'UI-ASSET' ? assetEl : assetEl.querySelector('ui-asset')) as HTMLElement || assetEl;
-                syncUiAssetToDump(uiAsset, _lastDump);
-                const changeInfo = resolveChangeFromEvent(e);
-                if (changeInfo) {
-                    await applyPropertyChange(panel, changeInfo.propPath, changeInfo.newValue);
-                } else if (_currentTriggerAutoSave) {
-                    _currentTriggerAutoSave();
-                }
-                return;
-            }
-
-            // Enum change: apply change immediately and invoke setter
-            const enumEl = findEnumElement(path);
-            if (enumEl) {
-                console.log(`[pTS Inspector] Enum change detected on <${enumEl.tagName}>`);
-                const changeInfo = resolveChangeFromEvent(e);
-                if (changeInfo) {
-                    await applyPropertyChange(panel, changeInfo.propPath, changeInfo.newValue);
-                } else {
-                    if (_currentTriggerAutoSave) _currentTriggerAutoSave();
-                    updateLiveGettersAndVisibility(panel);
-                }
-                return;
-            }
-
-            // Boolean toggle: apply change immediately and invoke setter
-            const boolEl = findBooleanElement(path);
-            if (boolEl) {
-                console.log(`[pTS Inspector] Boolean toggle detected on <${boolEl.tagName}>`);
-                const changeInfo = resolveChangeFromEvent(e);
-                if (changeInfo) {
-                    await applyPropertyChange(panel, changeInfo.propPath, changeInfo.newValue);
-                } else {
-                    if (_currentTriggerAutoSave) _currentTriggerAutoSave();
-                    updateLiveGettersAndVisibility(panel);
-                }
-                return;
-            }
-
-            // Curve change: apply change immediately
-            const curveEl = findCurveElement(path);
-            if (curveEl) {
-                console.log(`[pTS Inspector] Curve change detected on <${curveEl.tagName}>`);
-                const uiCurve = (curveEl.tagName === 'UI-CURVE' ? curveEl : curveEl.querySelector('ui-curve')) as HTMLElement || curveEl;
-                syncUiCurveToDump(uiCurve, _lastDump);
-                const changeInfo = resolveChangeFromEvent(e);
-                if (changeInfo) {
-                    await applyPropertyChange(panel, changeInfo.propPath, changeInfo.newValue);
-                } else if (_currentTriggerAutoSave) {
-                    _currentTriggerAutoSave();
-                }
-                return;
-            }
-
-            // Primary property (cc-prop / ui-input / ui-num-input):
-            // Rule: "if the target value changed is primary ( cc-prop ), then only save if user hit enter"
-            if (isPrimaryInput(path)) {
-                console.log(`[pTS Inspector] Primary property change event ignored (requires Enter key to save).`);
-                return;
-            }
-
-            // Fallback for any other non-primary controls
-            const changeInfo = resolveChangeFromEvent(e);
-            if (changeInfo) {
-                await applyPropertyChange(panel, changeInfo.propPath, changeInfo.newValue);
-            } else {
-                if (_currentTriggerAutoSave) _currentTriggerAutoSave();
-                updateLiveGettersAndVisibility(panel);
-            }
-        };
-
-        this.$.view.addEventListener('change', handleChangeEvent, true);
-        this.$.view.addEventListener('change-dump', handleChangeEvent, true);
-
-        // 2. CONFIRM event:
-        const handleConfirmEvent = async (e: any) => {
-            const path = e.composedPath ? e.composedPath() : [e.target];
-
-            const assetEl = findAssetElement(path);
-            if (assetEl) {
-                const uiAsset = (assetEl.tagName === 'UI-ASSET' ? assetEl : assetEl.querySelector('ui-asset')) as HTMLElement || assetEl;
-                syncUiAssetToDump(uiAsset, _lastDump);
-            }
-
-            const curveEl = findCurveElement(path);
-            if (curveEl) {
-                const uiCurve = (curveEl.tagName === 'UI-CURVE' ? curveEl : curveEl.querySelector('ui-curve')) as HTMLElement || curveEl;
-                syncUiCurveToDump(uiCurve, _lastDump);
-            }
-
-            console.log(`[pTS Inspector] Confirm event (Enter/select) -> triggering change.`);
-            const changeInfo = resolveChangeFromEvent(e);
-            if (changeInfo) {
-                await applyPropertyChange(panel, changeInfo.propPath, changeInfo.newValue);
-            } else {
-                if (_currentTriggerAutoSave) _currentTriggerAutoSave();
-                updateLiveGettersAndVisibility(panel);
-            }
-        };
-
-        this.$.view.addEventListener('confirm', handleConfirmEvent, true);
-        this.$.view.addEventListener('confirm-dump', handleConfirmEvent, true);
-
-        // 3. KEYDOWN event:
-        // Ensures Enter keypress triggers save for primary inputs even before blur
-        this.$.view.addEventListener('keydown', async (e: KeyboardEvent) => {
-            if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
-                e.preventDefault();
-                e.stopPropagation();
-                panel.$.save?.click();
-                return;
-            }
-            if (e.key === 'Enter') {
-                const path = e.composedPath ? e.composedPath() : [e.target];
-
-                const assetEl = findAssetElement(path);
-                if (assetEl) {
-                    const uiAsset = (assetEl.tagName === 'UI-ASSET' ? assetEl : assetEl.querySelector('ui-asset')) as HTMLElement || assetEl;
-                    syncUiAssetToDump(uiAsset, _lastDump);
-                }
-
-                const curveEl = findCurveElement(path);
-                if (curveEl) {
-                    const uiCurve = (curveEl.tagName === 'UI-CURVE' ? curveEl : curveEl.querySelector('ui-curve')) as HTMLElement || curveEl;
-                    syncUiCurveToDump(uiCurve, _lastDump);
-                }
-
-                console.log(`[pTS Inspector] Enter key hit on primary field -> triggering change.`);
-                const changeInfo = resolveChangeFromEvent(e);
-                if (changeInfo) {
-                    await applyPropertyChange(panel, changeInfo.propPath, changeInfo.newValue);
-                } else {
-                    if (_currentTriggerAutoSave) _currentTriggerAutoSave();
-                    updateLiveGettersAndVisibility(panel);
-                }
-            }
-        }, true);
-
-        // 4. DROP event:
-        // Asset drag and drop
-        this.$.view.addEventListener('drop', (e: Event) => {
-            setTimeout(async () => {
-                const path = e.composedPath ? e.composedPath() : [e.target];
-                const assetEl = findAssetElement(path);
-                if (assetEl) {
-                    const uiAsset = (assetEl.tagName === 'UI-ASSET' ? assetEl : assetEl.querySelector('ui-asset')) as HTMLElement || assetEl;
-                    syncUiAssetToDump(uiAsset, _lastDump);
-                }
-                const curveEl = findCurveElement(path);
-                if (curveEl) {
-                    const uiCurve = (curveEl.tagName === 'UI-CURVE' ? curveEl : curveEl.querySelector('ui-curve')) as HTMLElement || curveEl;
-                    syncUiCurveToDump(uiCurve, _lastDump);
-                }
-                const changeInfo = resolveChangeFromEvent(e);
-                if (changeInfo) {
-                    await applyPropertyChange(panel, changeInfo.propPath, changeInfo.newValue);
-                } else {
-                    if (_currentTriggerAutoSave) _currentTriggerAutoSave();
-                    updateLiveGettersAndVisibility(panel);
-                }
-            }, 30);
-        }, true);
+        this.$.view.addEventListener('change', proxyChange, true);
+        this.$.view.addEventListener('change-dump', proxyChange, true);
+        this.$.view.addEventListener('confirm', proxyConfirm, true);
+        this.$.view.addEventListener('confirm-dump', proxyConfirm, true);
+        this.$.view.addEventListener('keydown', proxyKeydown, true);
+        this.$.view.addEventListener('drop', proxyDrop, true);
     }
 
     if (this.$.ptsa) {

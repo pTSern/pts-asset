@@ -1,3 +1,4 @@
+import './cache-bust'
 import fs from 'fs'
 import pkg from '../package.json'
 import path from 'path'
