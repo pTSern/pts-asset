@@ -4,6 +4,7 @@ import pkg from '../package.json';
 import { collectValuesFromDump, extractAssetDependencies } from './pts';
 import { getExtendsChain } from './inheritance';
 import { setCachedPtsType } from './main';
+import { rescanAndSyncLazyPrefab } from './lazy-registry';
 
 declare const Editor: any;
 
@@ -447,6 +448,10 @@ export async function createAndInitPtsAsset(assetInfo: MenuAssetInfo | undefined
         } catch (metaErr) {
             console.error('[pts-asset] Failed to update meta for new asset:', metaErr);
         }
+
+        try {
+            rescanAndSyncLazyPrefab();
+        } catch {}
 
         // 7. Focus on the new asset so user can enter the name
         try {

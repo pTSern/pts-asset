@@ -500,6 +500,17 @@ export function rescanAndSyncLazyPrefab(): LazySyncReport {
     const prefabMetaPath = path.join(secretDir, '_lazy.prefab.meta');
     const registerCid = getRegisterScriptCid(extensionAssetsDir);
 
+    const writeIfChanged = (filePath: string, nextContent: string): boolean => {
+        if (fs.existsSync(filePath)) {
+            try {
+                const prevContent = fs.readFileSync(filePath, 'utf8');
+                if (prevContent === nextContent) return false;
+            } catch {}
+        }
+        fs.writeFileSync(filePath, nextContent, 'utf8');
+        return true;
+    };
+
     const prefabData = [
         {
             __type__: 'cc.Prefab',
@@ -573,7 +584,7 @@ export function rescanAndSyncLazyPrefab(): LazySyncReport {
         }
     ];
 
-    fs.writeFileSync(prefabPath, JSON.stringify(prefabData, null, 2), 'utf8');
+    const prefabChanged = writeIfChanged(prefabPath, JSON.stringify(prefabData, null, 2));
 
     const prefabMeta = {
         ver: '1.1.50',
@@ -586,7 +597,7 @@ export function rescanAndSyncLazyPrefab(): LazySyncReport {
             syncNodeName: '_lazy'
         }
     };
-    fs.writeFileSync(prefabMetaPath, JSON.stringify(prefabMeta, null, 2), 'utf8');
+    const prefabMetaChanged = writeIfChanged(prefabMetaPath, JSON.stringify(prefabMeta, null, 2));
 
     // 8. Generate dynamic bundle mapping for secondary bundle assets
     const bundleMap: Record<string, string> = {};
@@ -630,8 +641,9 @@ export function rescanAndSyncLazyPrefab(): LazySyncReport {
 
     const bundleMapPath = path.join(secretDir, 'pts-bundle-map.json');
     const bundleMapMetaPath = path.join(secretDir, 'pts-bundle-map.json.meta');
-    fs.writeFileSync(bundleMapPath, JSON.stringify(bundleMap, null, 2), 'utf8');
+    const bundleMapChanged = writeIfChanged(bundleMapPath, JSON.stringify(bundleMap, null, 2));
 
+    let bundleMapMetaChanged = false;
     if (!fs.existsSync(bundleMapMetaPath)) {
         const bundleMapMeta = {
             ver: '2.0.1',
@@ -642,11 +654,12 @@ export function rescanAndSyncLazyPrefab(): LazySyncReport {
             subMetas: {},
             userData: {}
         };
-        fs.writeFileSync(bundleMapMetaPath, JSON.stringify(bundleMapMeta, null, 2), 'utf8');
+        bundleMapMetaChanged = writeIfChanged(bundleMapMetaPath, JSON.stringify(bundleMapMeta, null, 2));
     }
 
-    // Notify AssetDB
-    if (typeof Editor !== 'undefined' && Editor.Message && Editor.Message.send) {
+    // Notify AssetDB only when _$secret files actually changed or were created
+    if ((prefabChanged || prefabMetaChanged || bundleMapChanged || bundleMapMetaChanged) &&
+        typeof Editor !== 'undefined' && Editor.Message && Editor.Message.send) {
         try {
             Editor.Message.send('asset-db', 'refresh-asset', 'db://pts-asset/_$secret');
         } catch {}

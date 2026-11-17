@@ -437,6 +437,7 @@ export function populateDumpWithSaved(dump: any, savedVal: any) {
 
     // 7.5. Enums (String or Number values - NEVER treat as assets!)
     if (isEnumType(dump)) {
+        dump.type = 'Enum';
         let enumVal = vData;
         if (enumVal && typeof enumVal === 'object') {
             if (enumVal.__type__ === 'Enum' && enumVal.__value__ !== undefined) {
@@ -445,6 +446,30 @@ export function populateDumpWithSaved(dump: any, savedVal: any) {
             if (enumVal && typeof enumVal === 'object' && 'uuid' in enumVal) {
                 enumVal = enumVal.uuid;
             }
+        }
+        const enumList: Array<{ name: string; value: any }> | null = Array.isArray(dump.enumList) ? dump.enumList : null;
+        if (enumList && enumList.length > 0) {
+            const firstOptVal = enumList[0].value;
+            const isStrEnum = typeof firstOptVal === 'string';
+            const isNumEnum = typeof firstOptVal === 'number';
+
+            const findMatch = (v: any) => enumList.find(opt => opt.value === v || String(opt.value) === String(v));
+
+            const matched = (enumVal !== undefined && enumVal !== null && enumVal !== '') ? findMatch(enumVal) : undefined;
+            if (matched) {
+                dump.value = matched.value;
+            } else {
+                const defRaw = typeof dump.default === 'function' ? dump.default() : dump.default;
+                const defMatch = (defRaw !== undefined && defRaw !== null && defRaw !== '') ? findMatch(defRaw) : undefined;
+                dump.value = defMatch ? defMatch.value : firstOptVal;
+            }
+
+            if (isStrEnum && typeof dump.default !== 'string') {
+                dump.default = typeof dump.value === 'string' ? dump.value : firstOptVal;
+            } else if (isNumEnum && typeof dump.default !== 'number') {
+                dump.default = typeof dump.value === 'number' ? dump.value : firstOptVal;
+            }
+            return;
         }
         if (typeof enumVal !== 'undefined' && enumVal !== null) {
             dump.value = enumVal;

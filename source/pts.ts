@@ -2642,29 +2642,42 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
         let newValue: any = undefined;
 
         const assetEl = findAssetElement(path);
+        const enumEl = !assetEl ? findEnumElement(path) : null;
+        const boolEl = (!assetEl && !enumEl) ? findBooleanElement(path) : null;
+        const curveEl = (!assetEl && !enumEl && !boolEl) ? findCurveElement(path) : null;
+
         if (assetEl) {
             const uiAsset = (assetEl.tagName === 'UI-ASSET' ? assetEl : assetEl.querySelector('ui-asset')) as HTMLElement || assetEl;
             newValue = (uiAsset as any).value || "";
-        } else {
-            const enumEl = findEnumElement(path);
-            if (enumEl) {
-                newValue = (enumEl as any).value;
-            } else {
-                const boolEl = findBooleanElement(path);
-                if (boolEl) {
-                    newValue = (boolEl as any).value !== undefined ? (boolEl as any).value : (boolEl as any).checked;
-                } else {
-                    const curveEl = findCurveElement(path);
-                    if (curveEl) {
-                        const uiCurve = (curveEl.tagName === 'UI-CURVE' ? curveEl : curveEl.querySelector('ui-curve')) as HTMLElement || curveEl;
-                        const cVal = (uiCurve as any).value || (curveEl as any).dump?.value;
-                        newValue = normalizeCurveValue(cVal);
-                    } else if ('value' in target) {
-                        newValue = (target as any).value;
-                    }
-                }
+        } else if (enumEl) {
+            const uiSelect = (enumEl.tagName === 'UI-SELECT' || enumEl.tagName === 'UI-SELECT-PRO' || enumEl.tagName === 'SELECT' || enumEl.tagName === 'UI-RADIO-GROUP')
+                ? enumEl
+                : (enumEl.querySelector('ui-select, ui-select-pro, select, ui-radio-group') as HTMLElement || enumEl);
+            newValue = (uiSelect as any).value;
+            if ((newValue === undefined || newValue === '') && (enumEl as any).dump?.value !== undefined) {
+                newValue = (enumEl as any).dump.value;
             }
+        } else if (boolEl) {
+            const uiCheckbox = (boolEl.tagName === 'UI-CHECKBOX' || boolEl.tagName === 'INPUT')
+                ? boolEl
+                : (boolEl.querySelector('ui-checkbox, input[type="checkbox"]') as HTMLElement || boolEl);
+            newValue = (uiCheckbox as any).value !== undefined ? (uiCheckbox as any).value : (uiCheckbox as any).checked;
+        } else if (curveEl) {
+            const uiCurve = (curveEl.tagName === 'UI-CURVE' ? curveEl : curveEl.querySelector('ui-curve')) as HTMLElement || curveEl;
+            const cVal = (uiCurve as any).value || (curveEl as any).dump?.value;
+            newValue = normalizeCurveValue(cVal);
+        } else if ('value' in target) {
+            newValue = (target as any).value;
         }
+
+        const coerceEnumValue = (dumpNode: any, val: any): any => {
+            if (!dumpNode || !isEnumType(dumpNode)) return val;
+            if (Array.isArray(dumpNode.enumList) && dumpNode.enumList.length > 0) {
+                const matched = dumpNode.enumList.find((opt: any) => opt.value === val || String(opt.value) === String(val));
+                if (matched) return matched.value;
+            }
+            return val;
+        };
 
         // 1. Check for closest UI-PROP with dump.path
         for (const el of path) {
@@ -2711,6 +2724,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 if (newValue === undefined && dump.value !== undefined) {
                     newValue = dump.value;
                 }
+                newValue = coerceEnumValue(dump, newValue);
                 return { propPath: dump.path, newValue };
             }
         }
@@ -2721,6 +2735,8 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             const propDump = _lastDump?.value?.[basicProp.dataset.key];
             if (propDump && isRealCurve(propDump)) {
                 newValue = normalizeCurveValue(newValue !== undefined ? newValue : propDump.value);
+            } else if (propDump) {
+                newValue = coerceEnumValue(propDump, newValue);
             }
             return { propPath: basicProp.dataset.key, newValue };
         }

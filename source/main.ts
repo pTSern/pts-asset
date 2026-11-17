@@ -63,6 +63,20 @@ export async function checkPtsCoreDependency(showDialog: boolean = true): Promis
 
 let _scriptAutoFixTimer: any = null;
 const _pendingScriptFixes = new Set<string>();
+let _lazyAutoSyncTimer: any = null;
+
+function scheduleLazyAutoSync(...args: unknown[]) {
+    const delayMs = typeof args[0] === 'number' ? args[0] : 300;
+    if (_lazyAutoSyncTimer) clearTimeout(_lazyAutoSyncTimer);
+    _lazyAutoSyncTimer = setTimeout(() => {
+        _lazyAutoSyncTimer = null;
+        try {
+            rescanAndSyncLazyPrefab();
+        } catch (err) {
+            console.error('[pts-asset] Error auto-syncing _lazy.prefab:', err);
+        }
+    }, delayMs);
+}
 
 function scheduleScriptAutoFix(tsFile: string) {
     _pendingScriptFixes.add(tsFile);
@@ -136,6 +150,7 @@ export const methods: { [key: string]: (...any: any) => any } = {
         _installMessageHook();
         try {
             _warmupPtsIndex(true);
+            rescanAndSyncLazyPrefab();
         } catch {}
     },
     async onSelectionSelect(type: string, uuid: string) {
@@ -179,6 +194,7 @@ export const methods: { [key: string]: (...any: any) => any } = {
                 console.log(`[pts-asset] Runtime inheritance chains refreshed: ${Object.keys(chains).length} classes`);
             }
         } catch (e) {}
+        scheduleLazyAutoSync();
     },
 
     /**
@@ -191,6 +207,10 @@ export const methods: { [key: string]: (...any: any) => any } = {
         try {
             const data = await Editor.Message.request('asset-db', 'query-asset-info', uuid);
             if (!data) return;
+            // Ignore internal _$secret bundle files to avoid self-triggering loops
+            if (data.file && (data.file.includes('_$secret') || data.file.endsWith('_lazy.prefab') || data.file.endsWith('pts-bundle-map.json'))) {
+                return;
+            }
             // Invalidate cache for this asset
             _ptsTypeCache.delete(uuid);
             if (data.file) _ptsTypeCache.delete(data.file);
@@ -218,6 +238,12 @@ export const methods: { [key: string]: (...any: any) => any } = {
                 return;
             }
 
+            // If a scene or prefab changed, re-sync _lazy.prefab dependencies
+            if (data.file && (data.file.endsWith('.scene') || data.file.endsWith('.prefab'))) {
+                scheduleLazyAutoSync();
+                return;
+            }
+
             // Only process .pts files
             if (!data.file || !data.file.endsWith('.pts')) return;
 
@@ -230,6 +256,7 @@ export const methods: { [key: string]: (...any: any) => any } = {
             if (!meta) return;
 
             await _patchPtsLibrary(uuid, data, meta);
+            scheduleLazyAutoSync();
         } catch (e) {
             // Silently ignore — asset might not be a .pts file
         }
@@ -238,6 +265,7 @@ export const methods: { [key: string]: (...any: any) => any } = {
     async onAssetDeleted(uuid: string) {
         if (!uuid) return;
         _removeSinglePtsFile(uuid);
+        scheduleLazyAutoSync();
     },
 
     previewSession(info: { sessionId: string; running: boolean }) {
@@ -1441,7 +1469,10 @@ export async function load() {
         const projectPath = (typeof Editor !== 'undefined' && Editor.Project && Editor.Project.path) ? Editor.Project.path : process.cwd();
         cleanOrphanMetas(path.join(projectPath, 'assets'));
         cleanOrphanMetas(path.join(projectPath, 'extensions/pts-asset/assets'));
+        rescanAndSyncLazyPrefab();
     } catch {}
+
+    _previewLifecycleMessage.addBroadcastListener('asset-db:ready', scheduleLazyAutoSync);
 
     try {
         Editor.Message.request('scene', 'execute-scene-script', {
@@ -1464,6 +1495,15 @@ export async function load() {
  */
 export function unload() {
     _previewLifecycleMessage.removeBroadcastListener('scene:preview-stop', _endPreviewSession);
+    _previewLifecycleMessage.removeBroadcastListener('asset-db:ready', scheduleLazyAutoSync);
+    if (_lazyAutoSyncTimer) {
+        clearTimeout(_lazyAutoSyncTimer);
+        _lazyAutoSyncTimer = null;
+    }
+    if (_scriptAutoFixTimer) {
+        clearTimeout(_scriptAutoFixTimer);
+        _scriptAutoFixTimer = null;
+    }
     for (const observation of _previewObservations.values()) _sendPreviewObservation(observation, true);
     _previewObservations.clear();
     _previewSessionId = null;
