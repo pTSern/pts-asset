@@ -1,266 +1,311 @@
-# `pts-asset` - ScriptableObject Engine for Cocos Creator
+# pTS-Asset
 
-> **Author**: pTSern  
-> **Version**: `1.0.0`  
-> **Cocos Creator Compatibility**: `>= 3.8.0`  
-> **Category**: Editor Extension & Asset Architecture  
-> **Detailed Pipeline Spec**: [`extensions/pts-asset/.agents/PIPLINE.md`](file:///E:/__pTSern/KingdomMatch/extensions/pts-asset/.agents/PIPLINE.md)
+A **ScriptableObject-style custom asset system** (`.pts`) for **Cocos Creator 3.8.8+**, providing a custom asset importer, hierarchical editor creation menus, type-safe drag-and-drop with inheritance validation, a dedicated Inspector with live runtime preview, automatic schema fixing, tree-shaking protection via lazy bundle migration, and runtime hydration through `Json.Register`.
 
 ---
 
-## 1. Overview
+## Features
 
-`pts-asset` brings **Unity ScriptableObject-style workflows** to Cocos Creator 3.8.x. In native Cocos Creator, data assets are typically stored as raw JSON, which lacks first-class engine integration: they cannot be decorated with `@property`, do not support type-safe drag-and-drop validation into Component inspector slots, cannot display custom thumbnails in the Asset panel, and are vulnerable to build-time tree-shaking when not referenced by a scene or prefab.
-
-`pts-asset` solves this comprehensively by introducing:
-1. **`.pts` Custom Asset Format**: Strongly-typed data assets containing metadata, versioning, and serialized class properties.
-2. **First-Class Editor Integration**: Custom file icon rendering in the Assets tree, asset picker ("More" dialog), and Inspector header.
-3. **Type-Safe Drag & Drop**: Inheritance-aware validation permitting only assets whose `@ccclass` derives from the target slot's declared type.
-4. **Interactive Asset Picker**: Full compatibility with Cocos Creator's asset picker popup dialog.
-5. **Build Tree-Shaking Protection**: Automated `_lazy.prefab` registry ensuring `.pts` assets are retained during production builds.
-6. **Dedicated Inspector Panel**: Dockable editor panel for viewing, editing, creating, and diagnosing `.pts` assets.
+- **Custom `.pts` Asset Pipeline**: Strongly typed ScriptableObject data assets stored as JSON (`__type__` + `__value__`), registered with Cocos Creator's AssetDB (`asset-db.ts`, `importer.ts`) with automatic dependency extraction so referenced assets are never pruned during builds.
+- **Hierarchical `Create pTS Asset` Menu (`asset-menu.ts`)**: Right-click in the Assets panel (**Create → Create pTS Asset**) to instantiate any concrete `pTSAsset` subclass. Organize classes into nested submenus using `@pTSAsset.menu("Category/Subcategory/Name")`; `abstract` classes are automatically excluded.
+- **Type-Safe Drag & Drop & Asset Picker (`inheritance.ts`)**: Inheritance-aware validation lets you drag `.pts` assets into `@property({ type: TargetClass })` slots (or pick them via the **"More"** dialog) only when the asset's class matches or extends `TargetClass`.
+- **Custom `.pts` Inspector (`pts.ts`)**: Full property inspector for `.pts` assets supporting primitives, `Vec2`/`Vec3`/`Vec4`/`Color`/`Rect`/`Size`, `RealCurve`, `Gradient`, `Enum`, nested objects, arrays, and asset references — with **Auto-Save**, **Fix**, **Lazy / Force-Lazy** flags, **Show Code**, and **Selected-Instance Live Preview**.
+- **Selected-Instance Live Preview**: Inspect and edit live hydrated `.pts` instances in memory during in-editor playback via subscription-based IPC (`observe-preview-data` / `unobserve-preview-data`), with **Logger** console inspection, `Enum` dropdowns, and clickable runtime `Node`/`Component` locators (`@editor_property`).
+- **Schema Fixing & Auto-Migration (`pts-fixer.ts`)**: Automatically detects script changes and repairs/migrates `.pts` files to match updated `@property` definitions, or batch-fixes the entire project via **Extension → pTS-Asset → Update .pts Assets** (or the **pTS-Asset** dashboard panel).
+- **Build Tree-Shaking Protection & Lazy Migration (`lazy-registry.ts`, `_lazy-migration.ts`)**: Scans live scenes, prefabs, and bundles to pack unprotected or `isForceLazy` `.pts` dependencies into `db://pts-asset/_$secret/_lazy.prefab` (mounted as a high-priority `_$secret` Asset Bundle). Dead `.pts` assets are automatically excluded.
+- **Runtime Serialization & Hydration (`Json.Register.ts`)**: Registers `.pts` downloader, parser, and factory hooks on `cc.assetManager`, handles deferred hydration, resolves cross-bundle UUID asset references, and hydrates `RealCurve`, `Gradient`, and value types seamlessly.
+- **Multi-Tier Icon Injection (`windows.ts`)**: Displays the custom `.pts` badge icon across the Assets tree, Asset Picker dialog, and Inspector header.
 
 ---
 
-## 2. Process Architecture & Pipeline
+## Requirements
 
+- **Cocos Creator**: `>= 3.8.8`
+- **Hard Peer Dependency**: `pts-core` (must be installed in `<your-project>/extensions/pts-core`; provides the `pTSAsset` base class, `@pTSAsset.menu`, `@editor_property`, and scene reflection utilities)
+
+---
+
+## Installation & Setup
+
+1. Ensure `pts-core` is installed in your project's `extensions/` directory:
+   ```text
+   <your-project>/extensions/pts-core
+   ```
+2. Copy `pts-asset` into your project's `extensions/` directory:
+   ```text
+   <your-project>/extensions/pts-asset
+   ```
+3. Build the extension (if `dist/` is not already compiled):
+   ```bash
+   cd extensions/pts-asset
+   npm install
+   npm run build
+   ```
+4. Enable **pts-asset** in Cocos Creator via **Extension → Extension Manager**.
+5. Open the dashboard panel via **Extension → pTS-Asset → Open Panel** (or configure Auto-Save in **Project → Project Settings → pTS Asset**).
+
+---
+
+## Architecture Overview
+
+```mermaid
+flowchart LR
+    subgraph Editor["Cocos Creator Editor (Main & Renderer)"]
+        direction TB
+        Menu["asset-menu.ts<br/>(Create pTS Asset Menu)"]
+        AssetDB["asset-db.ts & importer.ts<br/>(.pts Type & Dependency Scan)"]
+        Inherit["inheritance.ts<br/>(Type Reflection & Drag-Drop)"]
+        Inspector["pts.ts & panel.ts<br/>(Inspector & Dashboard Panel)"]
+        Fixer["pts-fixer.ts<br/>(Schema Sync & Auto-Fix)"]
+        LazyReg["lazy-registry.ts<br/>(_$secret/_lazy.prefab Sync)"]
+        Icons["windows.ts<br/>(Renderer Icon Injection)"]
+    end
+
+    subgraph Scene["Engine Scene Process"]
+        direction TB
+        Core["pts-core (_cc.js)<br/>(Live Inheritance & Preview Bridge)"]
+    end
+
+    subgraph Runtime["Game Runtime (db://pts-asset/assets/scripts/)"]
+        direction TB
+        JsonReg["Json.Register.ts<br/>(assetManager Downloader/Parser/Factory)"]
+        LazyMig["_lazy-migration.ts & pTSAsset_Register<br/>(_$secret Bundle & Persistent Cache)"]
+        Assets["Built-in pTSAssets<br/>(Number, String, Boolean, Range, ...)"]
+    end
+
+    Menu -->|"Create .pts"| AssetDB
+    Inherit --> AssetDB
+    Inherit --> Inspector
+    Fixer --> AssetDB
+    LazyReg -->|"Generate _lazy.prefab"| LazyMig
+    Inspector <-->|"IPC / Live Preview"| Core
+    Core <-->|"Hydrated Instances"| JsonReg
+    LazyMig -->|"lazyAssetsCache / bundleMapCache"| JsonReg
+    Assets --> JsonReg
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                          Editor / Main Process                              │
-│                                                                             │
-│  ┌────────────────────┐   ┌───────────────────────┐   ┌──────────────────┐  │
-│  │ Custom Importer    │   │  Inheritance Cache    │   │  Lazy Registry   │  │
-│  │ (source/importer)  │   │ (source/inheritance)  │   │ (_lazy.prefab)   │  │
-│  └─────────┬──────────┘   └───────────┬───────────┘   └────────┬─────────┘  │
-│            │                          │                        │            │
-│            ▼                          ▼                        ▼            │
-│  ┌────────────────────┐   ┌───────────────────────┐   ┌──────────────────┐  │
-│  │ AssetDB Hook       │   │ Drag & Drop Intercept │   │ Inspector Panel  │  │
-│  │ (query-assets/icon)│   │ (type validation)     │   │ (source/panel)   │  │
-│  └────────────────────┘   └───────────────────────┘   └──────────────────┘  │
-└──────────────────────────────────────┬──────────────────────────────────────┘
-                                       │ IPC (`execute-scene-script`)
-                                       ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         Engine Scene Process                                │
-│                                                                             │
-│  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │ `pts-core/src/_cc.js` -> `get_all_pts_inheritance_chains()`           │  │
-│  │ Inspects `cc.js._getClassById()`, `@ccclass` registry, & inheritance  │  │
-│  └───────────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
 
 ---
 
-## 3. The `.pts` Asset Format
+## `.pts` Asset Format
 
-`.pts` files are serialized JSON documents containing typed payload structures:
+`.pts` files are UTF-8 JSON documents storing the `@ccclass` identifier (`__type__`) and serialized property payload (`__value__`):
 
 ```json
 {
-  "__type__": "HeroConfig",
-  "__version__": "1.0.0",
-  "data": {
-    "heroName": "Arthur",
-    "baseHp": 1500,
-    "attackPower": 120,
-    "skillPrefab": {
-      "__uuid__": "78b4d9a2-9f3b-4171-a477-90c239420045"
-    }
-  }
-}
-```
-
-### Accompanying Meta File (`.pts.meta`):
-The Cocos Creator asset pipeline assigns a unique UUID to each `.pts` file and associates it with the custom `pts-importer`:
-```json
-{
-  "ver": "1.0.0",
-  "importer": "pts-importer",
-  "imported": true,
-  "uuid": "d38a0864-...",
-  "files": [".json"],
-  "subMetas": {},
-  "userData": {
-    "type": "HeroConfig"
-  }
-}
-```
-
----
-
-## 4. Key Subsystems
-
-### 4.1. Multi-Tier Icon Injection
-Cocos Creator 3.8.x resolves asset tree icons via internal web components. `pts-asset` registers the custom icon (`assets/icons/pts.png`) across three distinct editor tiers:
-1. **Asset Tree View**: Injects CSS and protocol handlers so `.pts` entries display the purple pTS badge instead of generic text icons.
-2. **Asset Picker Dialog ("More" Button)**: Preserves thumbnail and badge rendering within the modal asset search popup.
-3. **Inspector Header**: Displays the custom icon when inspecting `.pts` assets.
-
-### 4.2. Drag-and-Drop Inheritance Validation (`source/inheritance.ts`)
-When dragging a `.pts` asset into an `@property({ type: TargetClass })` slot:
-1. The extension intercepts the drag payload to retrieve the source asset's `__type__`.
-2. Queries the live inheritance chain from `pts-core/src/_cc.js`.
-3. Validates whether `SourceClass` extends or matches `TargetClass`:
-   * **Allowed**: `HeroConfig` -> slot accepting `CharacterConfig` (where `HeroConfig extends CharacterConfig`).
-   * **Rejected**: `EnemyConfig` -> slot accepting `HeroConfig`.
-4. Visual feedback reflects valid drop targets immediately.
-
-### 4.3. Asset Picker Filtering ("More" Button)
-When clicking the search magnifying glass / "More" button on a component property slot:
-* Native Cocos Creator passes type filters (e.g. `cc.Asset` or specific class names) to `Editor.Message.request('asset-db', 'query-assets')`.
-* `pts-asset` hooks into the query pipeline to resolve asset types dynamically while filtering out negation globs (such as `!*.pts`) that would otherwise hide custom assets.
-
-### 4.4. Tree-Shaking Protection via `_lazy.prefab` (`source/lazy-registry.ts`)
-Cocos Creator strips assets from release builds if they are not referenced by an active scene or bundle root.
-* `pts-asset` maintains a dedicated hidden prefab (`_lazy.prefab`) in the project root.
-* All `.pts` assets are registered as dependencies on this prefab.
-* During project build, Cocos Creator sees the dependencies and bundles all `.pts` assets safely without stripping.
-
----
-
-## 5. Editor Contributions
-
-### 5.1. Dockable Panel (`panels.default`)
-* Accessible via menu: **Extension -> pTS Asset -> Open Panel**.
-* **Features**:
-  * **Asset Browser**: Filter, inspect, and search all `.pts` assets in the project.
-  * **Asset Creator**: Wizard to instantiate new `.pts` assets from any registered `pTSAsset` subclass.
-  * **Integrity Diagnostics**: Detects orphaned assets, mismatched `__type__` definitions, or missing schemas.
-  * **Auto-Save Toggle**: Configurable in Project Settings (`profile.project.isAutoSave`).
-
-### 5.2. Menu Contributions
-
-| Menu Path | Label | Triggered Message |
-|---|---|---|
-| `Extension/pTS Asset` | **Open Panel** | `open-panel` |
-| `Extension/pTS Asset` | **Reload** | `reload` |
-| `Extension/pTS Asset` | **Create** | `createz` |
-| `Extension/pTS Asset` | **Log** | `_cc:log` |
-| `Extension/pTS Asset` | **Update .pts Assets** | `pts::importer::lookup` |
-| `Extension/pTS Asset` | **Re-Scan & Sync Lazy Prefab** | `sync-lazy-prefab` |
-
-### 5.3. Core IPC Messages
-
-| Message Name | Type | Description |
-|---|---|---|
-| `open-panel` | Send | Opens or focuses the dockable pTS Asset inspector panel. |
-| `sync-lazy-prefab` | Request | Re-scans all `.pts` assets and synchronizes references in `_lazy.prefab`. |
-| `create-pts-asset` | Request | Programmatically creates a new `.pts` asset with specified class type and path. |
-| `pts::importer::lookup` | Send | Re-evaluates importer bindings and re-imports dirty `.pts` assets. |
-| `fix-all-pts-assets` | Request | Batch migrates legacy or malformed `.pts` files across the project. |
-| `observe-preview-data` | Request | Subscribes an Inspector to an existing hydrated instance by UUID; returns its current preview state and subscription identity. |
-| `unobserve-preview-data` | Request | Releases that Inspector's subscription and retained runtime reference. |
-| `sync-preview-data` | Send | Accepts changed runtime snapshots for the current playback session and Inspector subscription. |
-| `set-runtime-property` | Send | Applies an allowed Inspector edit to the selected runtime instance, in memory only. |
-| `runtime-property-result` | Send | Acknowledges a live edit with its authoritative state, including rejected or normalized values. |
-| `locate-runtime-reference` | Request | Validates a displayed Node/Component reference and locates its owner node in the runtime Hierarchy. |
-| `log-runtime-instance` | Request | `console.log`s the currently linked runtime instance inside the Game View. Returns `{ success }`; fails when no instance is linked. |
-
-### 5.4. Selected-Instance Live Preview
-
-During in-editor playback, selecting a `.pts` subscribes its Inspector to that UUID. The preview bridge in `pts-core/src/_cc.js` looks only in existing gameplay asset caches. Inspecting an asset never loads, constructs, or hydrates it.
-
-* **Not hydrated:** The Inspector displays **Waiting for runtime instance...** without creating an authoring substitute. It links automatically if gameplay later loads and hydrates that asset.
-* **Hydrated:** The inspection cache retains the actual selected instance. Only subscribed instances are sampled every 200 ms; no subscription means no observer timer. Unchanged displayed state sends no snapshot IPC and causes no Inspector re-render.
-* **Selection/lifecycle:** Switching selection or closing the Inspector releases its reference. Stopping preview clears runtime references and restores authoring controls. Playback sessions and subscription identities reject stale snapshots, asynchronous edits, and navigation requests.
-* **Live edits:** Writable properties use one broker path and apply only to game memory. The authoritative edit result reconciles rejected or setter-normalized values. Save, Fix, and lazy/meta authoring writes are disabled during both waiting and linked preview states.
-* **Runtime references:** Declare Node/Component debugging fields with `@editor_property(Node)` or `@editor_property(Component)`, imported from `db://pts-core/scripts/utils/pClass`. These runtime-only fields are not `.pts` authoring data. Their controls show the instance name and a UUID tooltip; clicking locates the owner node in Hierarchy. Component controls also show their type. Null or destroyed references display a disabled **None**, including array elements.
-* **Logger:** While a runtime instance is linked, a full-width **📋 Logger** button appears above the Show Code pane. It runs `console.log('[pTS Logger] <Class> (<uuid>):', instance)` in the Game View, printing the real live asset rather than a serialized snapshot. It is hidden while waiting for an instance.
-* **Enums:** Enum-typed properties render as a `ui-select` of `name → value` options, matching the native Inspector, instead of a bare number. Detection covers both `@property({ type: MyEnum })` and `@editor_property(MyEnum)`; the option list comes from the engine's `Enum.getList()` and works even when `__enums__` has not been materialized yet. Readonly `@editor_property` fields display the current option selected but not editable, as usual.
-
-The main-process broker sends subscription/edit controls directly to the active Game View guest using Electron IPC. Creator 3.8.8's window broadcasts do not reach that guest. Native session announcements identify the sender; changed snapshots and edit acknowledgements return through the extension messages above. Broker-to-Inspector notifications remain ordinary editor broadcasts.
-
-This replaces debug-only eager registries and full-registry snapshot producers. Normal asset loading, hydration, cloning, and gameplay-owned lazy caches are unchanged. The observer samples declared properties and explicit editor-property metadata, not arbitrary engine object graphs or prototype getters.
-
-Focused broker regression check: `npm run test:preview-subscriptions` from `extensions/pts-asset`.
-
----
-
-## 6. How to Define & Use a `pTSAsset`
-
-### Step 1: Declare the TypeScript Class
-```typescript
-import { _decorator } from 'cc';
-import { pTSAsset } from 'db://pts-core/scripts/pTSAsset';
-
-const { ccclass, property } = _decorator;
-
-@ccclass('WeaponConfig')
-export class WeaponConfig extends pTSAsset {
-    @property({ tooltip: 'Weapon display name' })
-    public weaponName: string = 'Excalibur';
-
-    @property({ tooltip: 'Damage multiplier' })
-    public damageMultiplier: number = 2.5;
-
-    @property({ tooltip: 'Durability points' })
-    public durability: number = 100;
-}
-```
-
-### Step 2: Create the Asset
-1. In Cocos Creator, open **Extension -> pTS Asset -> Open Panel**.
-2. Select `WeaponConfig` from the class dropdown and click **Create Asset**.
-3. Choose destination folder (e.g. `assets/configs/weapons/excalibur.pts`).
-4. Edit properties in the Inspector.
-
-### Step 3: Reference in a Component
-```typescript
-import { _decorator, Component } from 'cc';
-import { WeaponConfig } from './configs/WeaponConfig';
-
-const { ccclass, property } = _decorator;
-
-@ccclass('CombatController')
-export class CombatController extends Component {
-    @property({ type: WeaponConfig })
-    public equippedWeapon: WeaponConfig | null = null;
-
-    start() {
-        if (this.equippedWeapon) {
-            console.log(`Equipped: ${this.equippedWeapon.weaponName}`);
+    "__type__": "WeaponConfig",
+    "__value__": {
+        "weaponName": "Excalibur",
+        "damageMultiplier": 2.5,
+        "durability": 100,
+        "skillPrefab": {
+            "__uuid__": "78b4d9a2-9f3b-4171-a477-90c239420045"
         }
     }
 }
 ```
-* You can now drag `excalibur.pts` directly into the `equippedWeapon` slot in the Inspector, or pick it via the "More" button!
+
+The accompanying `.pts.meta` stores the resolved `__type__` and extracted `__depends__` UUID list in `userData` for fast AssetDB queries and build dependency tracking.
 
 ---
 
-## 7. Directory Structure
+## Usage
 
+### 1. Define a `pTSAsset` Subclass
+
+Extend `pTSAsset` from `db://pts-core/scripts/pTSAsset`, decorate with `@ccclass`, and optionally group it in the **Create pTS Asset** menu using `@pTSAsset.menu(...)`:
+
+```ts
+import { _decorator, Prefab, Node } from "cc";
+import { pTSAsset } from "db://pts-core/scripts/pTSAsset";
+import { editor_property } from "db://pts-core/scripts/utils/pClass";
+
+const { ccclass, property } = _decorator;
+
+@ccclass("WeaponConfig")
+@pTSAsset.menu("Configs/Combat/WeaponConfig")
+export class WeaponConfig extends pTSAsset {
+    @property({ tooltip: "Weapon display name" })
+    public weapon_name: string = "Excalibur";
+
+    @property({ tooltip: "Damage multiplier" })
+    public damage_multiplier: number = 2.5;
+
+    @property({ tooltip: "Durability points" })
+    public durability: number = 100;
+
+    @property({ type: Prefab })
+    public skill_prefab: Prefab | null = null;
+
+    // Runtime-only debugging reference (not serialized into .pts, clickable in Live Preview)
+    @editor_property(Node)
+    public owner_node: Node | null = null;
+}
 ```
-pts-asset/
-├── .agents/                         # Architectural documentation & pipeline specs
-│   └── PIPLINE.md                   # Full internal pipeline specification
+
+> **Tip:** Mark base classes as `abstract class BaseConfig extends pTSAsset` — they remain valid drag-and-drop / picker base types via `inheritance.ts`, while being hidden from the **Create pTS Asset** menu.
+
+### 2. Create & Edit `.pts` Assets in the Editor
+
+1. In the **Assets** panel, right-click a folder and choose **Create → Create pTS Asset → Configs → Combat → WeaponConfig** (or click the **+** button).
+2. Select the generated `.pts` file to inspect and edit its `@property` fields directly in the **Inspector**.
+3. Use the Inspector controls:
+   - **Save / Auto-Save**: Saves changes immediately when Auto-Save is enabled (configurable in **Project Settings → pTS Asset** or the **pTS-Asset** dashboard panel).
+   - **Fix**: Re-syncs the `.pts` file against the latest TypeScript class schema.
+   - **Lazy / Force-Lazy**: Controls whether the asset is explicitly registered in `_$secret/_lazy.prefab` for build retention.
+   - **Show Code**: Displays the backing TypeScript source right inside the Inspector.
+
+### 3. Reference in a Component & Load at Runtime
+
+#### Direct Component Property Reference
+
+```ts
+import { _decorator, Component } from "cc";
+import { WeaponConfig } from "./configs/WeaponConfig";
+
+const { ccclass, property } = _decorator;
+
+@ccclass("CombatController")
+export class CombatController extends Component {
+    @property({ type: WeaponConfig })
+    public equipped_weapon: WeaponConfig | null = null;
+
+    start() {
+        if (this.equipped_weapon) {
+            console.log(`Equipped: ${this.equipped_weapon.weapon_name} (x${this.equipped_weapon.damage_multiplier})`);
+        }
+    }
+}
+```
+
+Drag your `.pts` asset directly into the `equipped_weapon` slot in the Inspector, or select it via the **"More"** asset picker dialog.
+
+#### Dynamic Runtime Loading
+
+Because `Json.Register.ts` registers the `.pts` downloader, parser, and factory with `cc.assetManager`, `.pts` assets also work with standard Cocos loading APIs:
+
+```ts
+import { resources } from "cc";
+import { WeaponConfig } from "./configs/WeaponConfig";
+
+resources.load("configs/weapons/excalibur", WeaponConfig, (err, weapon) => {
+    if (err || !weapon) return;
+    console.log("Loaded weapon:", weapon.weapon_name);
+});
+```
+
+---
+
+## Selected-Instance Live Preview
+
+During in-editor playback, selecting a `.pts` asset subscribes its Inspector to that UUID without eagerly loading, constructing, or hydrating the asset:
+
+- **Waiting State**: If gameplay has not hydrated the asset yet, the Inspector displays **Waiting for runtime instance...** and automatically links once gameplay loads it.
+- **Linked State**: Samples only the selected instance every `200 ms` and skips IPC/re-renders when state is unchanged. Switching selection, closing the Inspector, or stopping preview releases the subscription and restores authoring controls.
+- **In-Memory Live Edits**: Writable properties apply to game memory via a single broker path (`set-runtime-property` / `runtime-property-result`). Authoring writes (`Save`, `Fix`, `Lazy` toggles) are disabled during preview.
+- **Runtime Locators & Enums**: Fields decorated with `@editor_property(Node)` or `@editor_property(Component)` display clickable locators that highlight the owner node in the runtime Hierarchy. Enum fields render as `name → value` dropdowns via `Enum.getList()`.
+- **Logger Button**: While linked, a full-width **Logger** button above **Show Code** runs `console.log('[pTS Logger] <Class> (<uuid>):', instance)` in the Game View to inspect the live object.
+
+---
+
+## Built-in `pTSAsset` Types & Components
+
+`extensions/pts-asset/assets/scripts/` ships ready-to-use `pTSAsset` subclasses and helper components:
+
+| Asset / Component | Path | Description |
+| :--- | :--- | :--- |
+| `pTSAsset_Boolean`, `pTSAsset_Integer`, `pTSAsset_Number`, `pTSAsset_Range`, `pTSAsset_String`, `pTSAsset_Strings` | `scripts/pTSAssets/` | Reactive primitive & range data assets (`@pTSAsset.menu("Primitive/...")`). |
+| `pTSAsset_JsonString`, `pTSAsset_EasingSelector`, `pTSAsset_GraphVariable`, `pTSAsset_Skeleton` | `scripts/pTSAssets/` | Structured JSON, easing, graph variable, and Spine skeleton data assets. |
+| `pTSAsset_Register` | `scripts/pTSAssets/pTSAsset.Register.ts` | Component attached to `_lazy.prefab` that registers retained assets into `lazyAssetsCache` on load. |
+| `Json.Register` | `scripts/json/Json.Register.ts` | Registers `.pts` `assetManager` pipeline hooks, deferred hydration, and cross-bundle UUID resolution. |
+| `Json_Watcher` | `scripts/json/Json.Watcher.ts` | Debug component for inspecting `JsonAsset` events/params and invoking them from the Inspector. |
+| `Json.Binder`, `Json.Set.Nodes`, `Data.UI.Displayer` | `scripts/Components/` | Runtime binding and UI display helper components. |
+
+---
+
+## Editor Contributions
+
+### Menu Items
+
+| Menu Path | Label | Triggered Message |
+| :--- | :--- | :--- |
+| `Extension/pTS-Asset` | **Open Panel** | `open-panel` |
+| `Extension/pTS-Asset` | **Reload** | `reload` |
+| `Extension/pTS-Asset` | **Update .pts Assets** | `pts::importer::lookup` |
+| `Extension/pTS-Asset` | **Re-Scan & Sync Lazy Prefab** | `sync-lazy-prefab` |
+
+### Key IPC Messages
+
+| Message | Purpose |
+| :--- | :--- |
+| `open-panel` | Opens or focuses the dockable **pTS-Asset** dashboard panel. |
+| `reload` | Clears type/class caches, reinstalls AssetDB & IPC hooks, and re-syncs `_lazy.prefab`. |
+| `create-pts-asset` | Programmatically creates and initializes a new `.pts` asset for a given class and target folder. |
+| `pts::importer::lookup` / `fix-all-pts-assets` | Batch-migrates and repairs all `.pts` files in the project against current scripts. |
+| `fix-pts-for-script` | Repairs `.pts` assets associated with a specific TypeScript script file. |
+| `sync-lazy-prefab` | Re-scans live scenes/prefabs/bundles and updates `_$secret/_lazy.prefab`. |
+| `observe-preview-data` / `unobserve-preview-data` | Subscribes/unsubscribes the Inspector to a live runtime `.pts` instance by UUID. |
+| `sync-preview-data` | Delivers changed runtime state snapshots for the active preview session. |
+| `set-runtime-property` / `runtime-property-result` | Applies and acknowledges live in-memory property edits during preview. |
+| `locate-runtime-reference` | Locates a runtime `Node`/`Component` reference in the Hierarchy. |
+| `log-runtime-instance` | Logs the linked runtime `.pts` instance to the Game View console. |
+
+---
+
+## Directory Structure
+
+```text
+extensions/pts-asset/
 ├── assets/
-│   ├── icons/pts.png                # Custom .pts asset badge icon
-│   └── scripts/                     # Runtime json registers and components
-├── dist/                            # Compiled extension JavaScript
-├── i18n/                            # Localization (en, zh)
-├── package.json                     # Extension manifest, panels, messages, menus
-├── source/                          # TypeScript source for editor extension
-│   ├── asset-db.ts                  # AssetDB query & icon hooks
-│   ├── asset-menu.ts                # Context menu integrations
-│   ├── importer.ts                  # Custom pts-importer implementation
-│   ├── inheritance.ts               # Type reflection & drag-and-drop validation
-│   ├── lazy-registry.ts             # _lazy.prefab tree-shaking protection
-│   ├── main.ts                      # Extension lifecycle & IPC dispatcher
-│   ├── panel.ts                     # Dockable Inspector UI panel
-│   └── pts.ts                       # Format serialization & deserialization
-└── tsconfig.json
+│   ├── icons/pts.png               # Custom .pts asset icon
+│   ├── pTS/pTSAction/              # Built-in pTSAction .pts assets
+│   └── scripts/
+│       ├── _$secret/
+│       │   └── _lazy-migration.ts  # Runtime _$secret bundle loader & lazyAssetsCache
+│       ├── Components/             # Data.UI.Displayer, Json.Binder, Json.Set.Nodes
+│       ├── json/
+│       │   ├── Json.Register.ts    # assetManager .pts pipeline & runtime hydration
+│       │   └── Json.Watcher.ts     # JsonAsset event/param inspector watcher
+│       └── pTSAssets/              # Built-in pTSAsset subclasses & pTSAsset_Register
+├── i18n/                           # Localization strings (en, zh)
+├── importer/
+│   └── core.js                     # Low-level AssetDB importer bridge
+├── scripts/                        # Preinstall & regression test scripts
+│   ├── test-preview-subscriptions.js
+│   ├── test-query-isolation.js
+│   └── test-script-code-display.js
+├── source/
+│   ├── asset-db.ts                 # AssetDB type resolution & dependency hooks
+│   ├── asset-menu.ts               # Hierarchical "Create pTS Asset" context menu & scanner
+│   ├── cache-bust.ts               # Hot-reload module cache invalidation
+│   ├── importer.ts                 # Custom .pts importer & UUID dependency extractor
+│   ├── inheritance.ts              # Static/runtime class hierarchy & drag-drop validation
+│   ├── lazy-registry.ts            # _$secret/_lazy.prefab scanner & orphan .meta cleanup
+│   ├── main.ts                     # Extension lifecycle, IPC broker, auto-fix & hooks
+│   ├── panel.ts                    # Dockable pTS-Asset dashboard panel
+│   ├── pts-fixer.ts                # Schema normalization & .pts batch/single fixer
+│   ├── pts.ts                      # Custom .pts Inspector & Live Preview UI
+│   ├── smart_ja.ts                 # Smart_JsonAsset node inspector section
+│   └── windows.ts                  # Electron renderer preload for .pts icon injection
+├── static/pts.png                  # Packaged editor icon resource
+├── bootstrap.js                    # Extension entry point
+└── package.json                    # Cocos Creator v2 extension manifest
 ```
 
-## 8. Changelog
+---
 
-### Unreleased
+## Development & Testing
 
-* Replaced eager `.pts` preview synchronization and Inspector polling with selected-instance subscriptions, changed-state delivery, and explicit playback lifecycle.
-* Added runtime-only Node/Component locator controls and authoritative live-edit acknowledgements.
-* Reworked the Inspector layout: icon/asset header, Save (4× width) + Fix row, Lazy/Force-Lazy row, scrollable property area, then a full-width **Logger** button above the Show Code toggle and scrollable code pane.
-* Added a full-width **Logger** button (above Show Code) that `console.log`s the real linked runtime instance inside the Game View.
-* Enum properties now render as `name → value` dropdowns in live preview (via `cc.Enum.isEnum` / `Enum.getList`), covering `@property({type:Enum})` and `@editor_property(Enum)`.
-* Removed `query-preview-data`; subscribers now use `observe-preview-data` / `unobserve-preview-data`.
-* Added subscription regressions for unchanged states, selection/playback races, release, and stale runtime-reference navigation.
+```bash
+cd extensions/pts-asset
+
+# One-time TypeScript build
+npm run build
+
+# Watch mode during development
+npm run watch
+
+# Run regression tests
+npm run test:preview-subscriptions
+npm run test:query-isolation
+npm run test:script-code-display
+```
