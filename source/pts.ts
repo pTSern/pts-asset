@@ -43,11 +43,13 @@ import {
     resolveAllAssetSubtypes,
     extractDumpValue,
     collectValuesFromDump,
+    isGetterDumpItem,
     isEditorPropItem,
+    verifyAndCleanDataFromDump,
     fixSinglePtsAsset
 } from './pts-fixer';
 
-export { extractAssetDependencies, extractDumpValue, collectValuesFromDump, populateDumpWithSaved, isEnumType, isEditorPropItem };
+export { extractAssetDependencies, extractDumpValue, collectValuesFromDump, populateDumpWithSaved, isEnumType, isGetterDumpItem, isEditorPropItem, verifyAndCleanDataFromDump };
 import { getScriptUuidForClass, getScriptPathForClass } from './inheritance';
 import { AssetInfo } from '@cocos/creator-types/editor/packages/asset-db/@types/public'
 import fs from 'fs'
@@ -808,6 +810,39 @@ async function requestAuthoringDump(panel: PanelThis, observer: PreviewObserver)
         });
         if (_isInLivePreviewMode || observer.epoch !== epoch || observer.uuid !== uuid || _currentPanel !== panel) return;
         if (!dump?.value) return;
+
+        // Verify once on inspect open: resolve asset subtypes, prune removed properties (root & nested),
+        // and strip any persisted getter/setter or @editor_property fields.
+        await resolveAllAssetSubtypes(dump.value);
+        if (_isInLivePreviewMode || observer.epoch !== epoch || observer.uuid !== uuid || _currentPanel !== panel) return;
+
+        const verifyResult = verifyAndCleanDataFromDump(_cachedData.__value__, dump);
+        if (verifyResult.changed && _cachedData) {
+            _cachedData.__value__ = verifyResult.cleanValues;
+            const cleanedContent = JSON.stringify(_cachedData, null, 4);
+            if (panel.$.jsonDisplay) {
+                panel.$.jsonDisplay.textContent = cleanedContent;
+            }
+            if (!_isSaving) {
+                _isSaving = true;
+                _lastSaveTime = Date.now();
+                try {
+                    await Editor.Message.request('asset-db', 'save-asset', uuid, cleanedContent);
+                    if (verifyResult.removedKeys.length > 0) {
+                        console.log(`[pTS Inspector] Verified ${_cachedData.__type__} on inspect; removed obsolete/getter fields:`, verifyResult.removedKeys);
+                    } else {
+                        console.log(`[pTS Inspector] Verified & synced ${_cachedData.__type__} on inspect.`);
+                    }
+                } catch (saveErr) {
+                    console.warn('[pTS Inspector] Failed to persist verified .pts asset:', saveErr);
+                } finally {
+                    _isSaving = false;
+                    _lastSaveTime = Date.now();
+                }
+            }
+        }
+        if (_isInLivePreviewMode || observer.epoch !== epoch || observer.uuid !== uuid || _currentPanel !== panel) return;
+
         _authoringDump = JSON.parse(JSON.stringify(dump));
         _lastDump = dump;
         renderView.call(panel, dump.value);
@@ -836,6 +871,9 @@ function populateInspectorValue(item: InspectorDump, value: unknown) {
     if (isRuntimeReferenceField(item, value)) {
         item.readonly = true;
         item.value = value === undefined ? (item.isArray ? [] : null) : value;
+        return;
+    }
+    if (!_isInLivePreviewMode && isGetterDumpItem(item)) {
         return;
     }
     populateDumpWithSaved(item, value);
@@ -2518,8 +2556,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                     if (propName === 'script' || propName === '__scriptAsset' || isEditorPropItem(dump, propName, _lastDump?.__editor_props__)) {
                         return;
                     }
-                    const getterInfo = _lastDump?.__getters__?.[propName];
-                    if (getterInfo || dump.isGetter || _lastDump?.value?.['_' + propName] !== undefined) {
+                    if (isGetterDumpItem(dump, propName, _lastDump?.__getters__, _lastDump?.value)) {
                         return;
                     }
                     _cachedData.__value__[propName] = extractDumpValue(dump, _lastDump?.__editor_props__);
@@ -2578,8 +2615,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                     if (_ignores.includes(key)) continue;
                     const item = _lastDump.value[key];
                     if (isEditorPropItem(item, key, _lastDump.__editor_props__)) continue;
-                    const getterInfo = _lastDump?.__getters__?.[key];
-                    if (getterInfo || item.isGetter || _lastDump?.value?.['_' + key] !== undefined) continue;
+                    if (isGetterDumpItem(item, key, _lastDump.__getters__, _lastDump.value)) continue;
                     if (!(_cachedData.__value__.hasOwnProperty(key))) {
                         _cachedData.__value__[key] = extractDumpValue(item, _lastDump.__editor_props__);
                     }
@@ -2610,7 +2646,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 }
             }
 
-            // Strip any internal engine, lifecycle, ignored, getter, or editor_property debug fields from __value__
+            // Strip any internal engine, lifecycle, ignored, removed, getter, or editor_property debug fields from __value__
             if (_cachedData && _cachedData.__value__) {
                 for (const k of Object.keys(_cachedData.__value__)) {
                     const item = _lastDump?.value?.[k];
@@ -2622,8 +2658,22 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                         delete _cachedData.__value__[k];
                         continue;
                     }
-                    if (_lastDump?.__getters__?.[k] || item?.isGetter || _lastDump?.value?.['_' + k] !== undefined) {
+                    if (isGetterDumpItem(item, k, _lastDump?.__getters__, _lastDump?.value)) {
                         delete _cachedData.__value__[k];
+                        continue;
+                    }
+                    if (_lastDump?.value && !(k in _lastDump.value)) {
+                        const publicProp = k.startsWith('_') ? k.slice(1) : '';
+                        const pubDump = publicProp ? _lastDump.value[publicProp] : null;
+                        const pubGetter = publicProp ? _lastDump.__getters__?.[publicProp] : null;
+                        const isActiveSetterBacking = Boolean(
+                            pubDump &&
+                            !isEditorPropItem(pubDump, publicProp, _lastDump.__editor_props__) &&
+                            ((pubGetter && pubGetter.hasSetter) || pubDump.hasSetter)
+                        );
+                        if (!isActiveSetterBacking) {
+                            delete _cachedData.__value__[k];
+                        }
                     }
                 }
             }
@@ -2948,8 +2998,15 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             }
         }
 
-        // 2. Immediately update _cachedData.__value__
-        if (_cachedData.__value__) {
+        // 2. Immediately update _cachedData.__value__ (never persist getter/setter properties onto disk)
+        const targetLastPart = parts[parts.length - 1];
+        const isTargetGetter = isGetterDumpItem(
+            targetDump,
+            targetLastPart,
+            parts.length === 1 ? _lastDump?.__getters__ : undefined,
+            parts.length === 1 ? _lastDump?.value : undefined
+        );
+        if (_cachedData.__value__ && !isTargetGetter) {
             const valToSet = targetDump ? extractDumpValue(targetDump) : newValue;
             updateCachedDataByPath(_cachedData.__value__, propPath, valToSet);
         }
@@ -2977,9 +3034,11 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             if (changeResult.values) {
                 const cleanValues: Record<string, any> = {};
                 const epMap = changeResult.dump?.__editor_props__ || _lastDump?.__editor_props__;
+                const gettersMap = changeResult.dump?.__getters__ || _lastDump?.__getters__;
+                const dumpValMap = changeResult.dump?.value || _lastDump?.value;
                 for (const k of Object.keys(changeResult.values)) {
-                    const item = changeResult.dump?.value?.[k] || _lastDump?.value?.[k];
-                    if (!_ignores.includes(k) && !k.startsWith('__') && !isEditorPropItem(item, k, epMap)) {
+                    const item = dumpValMap?.[k];
+                    if (!_ignores.includes(k) && !k.startsWith('__') && !isEditorPropItem(item, k, epMap) && !isGetterDumpItem(item, k, gettersMap, dumpValMap)) {
                         cleanValues[k] = changeResult.values[k];
                     }
                 }
@@ -3330,6 +3389,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
 
         // 2. Fetch fresh class dump from scene script
         let dumpOut: any = null;
+        const currentSaved = (_cachedData && _cachedData.__value__) || {};
         try {
             dumpOut = await Editor.Message.request(
                 'scene',
@@ -3337,7 +3397,7 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
                 {
                     name: 'pts-core',
                     method: 'dump',
-                    args: [targetType]
+                    args: [targetType, currentSaved]
                 }
             );
         } catch (e) {
@@ -3354,30 +3414,15 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
             return;
         }
 
-        // 3. Merge existing saved data with the fresh dump (fills missing fields with defaults, sanitizes Node/Component to null)
-        const currentSaved = (_cachedData && _cachedData.__value__) || {};
-        for (const key of Object.keys(dumpOut.value)) {
-            if (_ignores.includes(key)) continue;
-            populateDumpWithSaved(dumpOut.value[key], currentSaved[key]);
-        }
-
-        // 3.5. Resolve all asset concrete subtypes asynchronously before collecting values
+        // 3. Resolve all asset concrete subtypes asynchronously before collecting values
         await resolveAllAssetSubtypes(dumpOut.value);
         if (!isAuthoringSelection(panel) || observer.epoch !== fixEpoch) {
             console.groupEnd();
             return;
         }
 
-        // 4. Extract sanitized and complete values (stripping readonly getters and @editor_property debug props)
-        const cleanValues = collectValuesFromDump(dumpOut.value, dumpOut.__getters__, dumpOut.__editor_props__);
-        if (cleanValues) {
-            for (const k of Object.keys(cleanValues)) {
-                const item = dumpOut.value?.[k];
-                if (isEditorPropItem(item, k, dumpOut.__editor_props__) || dumpOut.__getters__?.[k]?.readonly) {
-                    delete cleanValues[k];
-                }
-            }
-        }
+        // 4. Verify & extract sanitized values (pruning removed properties, stripping all getters/setters and @editor_property debug props)
+        const { cleanValues } = verifyAndCleanDataFromDump(currentSaved, dumpOut);
 
         // 5. Update _cachedData and save .pts asset
         _cachedData = {

@@ -254,6 +254,11 @@ export function extractAssetDependencies(val: any, out: Set<string> = new Set())
 export function populateDumpWithSaved(dump: any, savedVal: any) {
     if (!dump) return;
 
+    // Never overwrite a getter's live computed value when saved data is absent or readonly
+    if (isGetterDumpItem(dump) && (savedVal === undefined || dump.readonly)) {
+        return;
+    }
+
     // Unwrap previously corrupted Enum structures
     if (savedVal && typeof savedVal === 'object' && savedVal.__type__ === 'Enum') {
         savedVal = (savedVal.__value__ && typeof savedVal.__value__ === 'object' && 'uuid' in savedVal.__value__)
@@ -261,9 +266,13 @@ export function populateDumpWithSaved(dump: any, savedVal: any) {
             : (savedVal.__value__ !== undefined ? savedVal.__value__ : savedVal);
     }
 
-    // 0. Preserve polymorphic subtype from saved data if present (never for Enum)
+    const originalDumpType = normalizeType(dump.actualType || dump.type || '');
+
+    // 0. Preserve polymorphic subtype from saved data if present (never for Enum, never clobber a live instance's concrete type)
     if (savedVal && typeof savedVal === 'object' && savedVal.__type__ && savedVal.__type__ !== 'Enum') {
-        dump.actualType = savedVal.__type__;
+        if (!dump.__fromLiveInstance__) {
+            dump.actualType = savedVal.__type__;
+        }
         const u = savedVal.__value__?.uuid || (typeof savedVal.__value__ === 'string' ? savedVal.__value__ : savedVal.uuid);
         if (u && typeof u === 'string') {
             _uuidTypeCache.set(u, savedVal.__type__);
@@ -380,13 +389,28 @@ export function populateDumpWithSaved(dump: any, savedVal: any) {
 
     // 6. Nested @ccclass struct
     if (isNestedDump(dump.value)) {
-        if (savedVal && typeof savedVal === 'object' && savedVal.__type__) {
+        const dumpBaseType = originalDumpType;
+        const savedSubType = (savedVal && typeof savedVal === 'object' && savedVal.__type__)
+            ? normalizeType(savedVal.__type__)
+            : '';
+        const isDifferentSubtype = Boolean(savedSubType && dumpBaseType && savedSubType !== dumpBaseType);
+
+        if (dump.__fromLiveInstance__ && isDifferentSubtype) {
+            // Live instance (e.g. after onFocusInEditor) switched this nested field to a different concrete class.
+            // Keep the live instance dump intact instead of overwriting with stale saved fields from the previous class.
+            return;
+        }
+
+        if (!dump.__fromLiveInstance__ && savedVal && typeof savedVal === 'object' && savedVal.__type__) {
             dump.actualType = savedVal.__type__;
         }
         for (const childKey of Object.keys(dump.value)) {
             if (_ignores.includes(childKey)) continue;
             const childDump = dump.value[childKey];
             let childSaved = (vData && typeof vData === 'object') ? vData[childKey] : undefined;
+            if (isGetterDumpItem(childDump, childKey, dump.__getters__, dump.value) && (childSaved === undefined || childDump?.readonly)) {
+                continue;
+            }
             if ((childSaved === undefined || childSaved === '') && vData && typeof vData === 'object') {
                 if (childKey.startsWith('_')) {
                     const publicProp = childKey.slice(1);
@@ -402,8 +426,10 @@ export function populateDumpWithSaved(dump: any, savedVal: any) {
             }
             populateDumpWithSaved(childDump, childSaved);
         }
-        // Preserve any custom fields from savedVal that might be defined in a subclass
-        if (vData && typeof vData === 'object') {
+        // Only preserve extra fields from savedVal when savedVal is an un-expanded concrete subclass
+        // (e.g. Level_Mission_Collect inside a base-class Level_Mission dump).
+        // When savedVal has the same class (or came from a live instance dump), extra keys are removed/obsolete properties and MUST be pruned.
+        if (!dump.__fromLiveInstance__ && isDifferentSubtype && vData && typeof vData === 'object') {
             for (const extraKey of Object.keys(vData)) {
                 if (_ignores.includes(extraKey) || extraKey.startsWith('__') || isEditorPropItem(dump.value?.[extraKey], extraKey)) continue;
                 if (!dump.value[extraKey]) {
@@ -628,7 +654,7 @@ export function extractDumpValue(dump: any, editorProps?: Record<string, any>): 
             return [];
         }
         if (!Array.isArray(dump.value)) return [];
-        return dump.value.map((item: any) => extractDumpValue(item, editorProps));
+        return dump.value.map((item: any) => extractDumpValue(item));
     }
 
     if (isNodeOrComponent(dump)) {
@@ -704,14 +730,14 @@ export function extractDumpValue(dump: any, editorProps?: Record<string, any>): 
 
     if (isNestedDump(dump.value)) {
         const out: Record<string, any> = {};
+        const nestedGetters = dump.__getters__;
         for (const k of Object.keys(dump.value)) {
             if (_ignores.includes(k)) continue;
             const childDump = dump.value[k];
             // Do NOT apply outer class editorProps to nested struct children
             if (isEditorPropItem(childDump, k)) continue;
             // Get-set-ter properties should not be written to disk!
-            if (childDump && childDump.isGetter) continue;
-            if (dump.value['_' + k] !== undefined) continue;
+            if (isGetterDumpItem(childDump, k, nestedGetters, dump.value)) continue;
             out[k] = extractDumpValue(childDump);
         }
         // Ensure backing fields starting with '_' are synced from public getter/setter property if empty
@@ -771,6 +797,24 @@ export function extractDumpValue(dump: any, editorProps?: Record<string, any>): 
     return dump.value !== undefined ? dump.value : dump.default;
 }
 
+export function isGetterDumpItem(
+    dumpItem: any,
+    key?: string,
+    gettersInfo?: Record<string, any>,
+    siblingDumpMap?: Record<string, any>
+): boolean {
+    if (key && gettersInfo && gettersInfo[key]) return true;
+    if (dumpItem && typeof dumpItem === 'object') {
+        if (dumpItem.isGetter === true || dumpItem.hasGetter === true || dumpItem.hasSetter === true) {
+            return true;
+        }
+    }
+    if (key && siblingDumpMap && siblingDumpMap['_' + key] !== undefined) {
+        return true;
+    }
+    return false;
+}
+
 export function isEditorPropItem(dumpItem: any, key?: string, editorProps?: Record<string, any>): boolean {
     if (key && editorProps && editorProps[key]) return true;
     if (!dumpItem) return false;
@@ -789,12 +833,134 @@ export function collectValuesFromDump(dumpValue: any, gettersInfo?: Record<strin
         if (!item || item.name === 'script') continue;
         if (isEditorPropItem(item, key, editorProps)) continue;
         // Skip ALL getters and accessors! Get-set-ter properties should not be written to disk.
-        if (gettersInfo && gettersInfo[key]) continue;
-        if (item.isGetter) continue;
-        if (dumpValue['_' + key] !== undefined) continue;
+        if (isGetterDumpItem(item, key, gettersInfo, dumpValue)) continue;
         result[key] = extractDumpValue(item, editorProps);
     }
     return result;
+}
+
+function collectRemovedKeys(prevVal: any, nextVal: any, prefix = '', out: string[] = []): string[] {
+    if (!prevVal || typeof prevVal !== 'object') return out;
+    if (Array.isArray(prevVal)) {
+        if (!Array.isArray(nextVal)) return out;
+        const len = Math.min(prevVal.length, nextVal.length);
+        for (let i = 0; i < len; i++) {
+            collectRemovedKeys(prevVal[i], nextVal[i], `${prefix}[${i}]`, out);
+        }
+        return out;
+    }
+
+    const prevMap = ('__value__' in prevVal && prevVal.__value__ && typeof prevVal.__value__ === 'object')
+        ? prevVal.__value__
+        : prevVal;
+    const nextMap = (nextVal && typeof nextVal === 'object' && '__value__' in nextVal && nextVal.__value__ && typeof nextVal.__value__ === 'object')
+        ? nextVal.__value__
+        : (nextVal && typeof nextVal === 'object' ? nextVal : {});
+
+    // If concrete __type__ changed, don't misreport old class's fields as removed keys on the new class
+    if (prevVal.__type__ && nextVal?.__type__ && prevVal.__type__ !== nextVal.__type__) {
+        return out;
+    }
+
+    for (const k of Object.keys(prevMap)) {
+        if (k.startsWith('__')) continue;
+        const fullKey = prefix ? `${prefix}.${k}` : k;
+        if (!(k in nextMap)) {
+            out.push(fullKey);
+        } else if (prevMap[k] && typeof prevMap[k] === 'object' && nextMap[k] && typeof nextMap[k] === 'object') {
+            collectRemovedKeys(prevMap[k], nextMap[k], fullKey, out);
+        }
+    }
+    return out;
+}
+
+function reconcileSpecialSavedFields(dumpNode: any, savedVal: any): void {
+    if (!dumpNode || savedVal === undefined || savedVal === null) return;
+    if (isGradient(dumpNode)) {
+        const hasDumpKeys = (Array.isArray(dumpNode.colorKeys) && dumpNode.colorKeys.length > 0) ||
+            (Array.isArray(dumpNode.alphaKeys) && dumpNode.alphaKeys.length > 0);
+        if (!hasDumpKeys) {
+            populateDumpWithSaved(dumpNode, savedVal);
+        }
+        return;
+    }
+    if (dumpNode.isArray && Array.isArray(dumpNode.value) && Array.isArray(savedVal)) {
+        const len = Math.min(dumpNode.value.length, savedVal.length);
+        for (let i = 0; i < len; i++) {
+            reconcileSpecialSavedFields(dumpNode.value[i], savedVal[i]);
+        }
+        return;
+    }
+    if (isNestedDump(dumpNode.value)) {
+        const vData = (savedVal && typeof savedVal === 'object' && '__value__' in savedVal) ? savedVal.__value__ : savedVal;
+        if (!vData || typeof vData !== 'object') return;
+        const dumpType = normalizeType(dumpNode.actualType || dumpNode.type || '');
+        const savedType = (savedVal && typeof savedVal === 'object' && savedVal.__type__) ? normalizeType(savedVal.__type__) : '';
+        if (dumpNode.__fromLiveInstance__ && savedType && dumpType && savedType !== dumpType) {
+            return;
+        }
+        for (const k of Object.keys(dumpNode.value)) {
+            if (_ignores.includes(k) || k.startsWith('__')) continue;
+            if (k in vData) {
+                reconcileSpecialSavedFields(dumpNode.value[k], vData[k]);
+            }
+        }
+    }
+}
+
+export interface VerifyCleanResult {
+    changed: boolean;
+    cleanValues: Record<string, any>;
+    removedKeys: string[];
+}
+
+/**
+ * Verify cached .pts __value__ against an authoritative live class dump:
+ * - Reconciles special saved structures (e.g. cc.Gradient) without overwriting onFocusInEditor() mutations or re-injecting removed properties.
+ * - Extracts clean values purely from the live class schema (pruning all removed/obsolete properties at root & nested levels).
+ * - Strips all getter/setter properties (both getter-only and getter+setter) and @editor_property fields.
+ * - Preserves non-@property backing fields (e.g. _bundle) only when their public setter-backed property still exists.
+ */
+export function verifyAndCleanDataFromDump(
+    savedValues: Record<string, any> | null | undefined,
+    dumpRoot: any
+): VerifyCleanResult {
+    const currentSaved = (savedValues && typeof savedValues === 'object') ? savedValues : {};
+    if (!dumpRoot || !dumpRoot.value) {
+        return { changed: false, cleanValues: currentSaved, removedKeys: [] };
+    }
+
+    // 1. Reconcile any special saved fields (e.g. cc.Gradient) that live encode doesn't carry
+    for (const key of Object.keys(dumpRoot.value)) {
+        if (_ignores.includes(key) || key.startsWith('__') || key === 'script') continue;
+        if (key in currentSaved) {
+            reconcileSpecialSavedFields(dumpRoot.value[key], currentSaved[key]);
+        }
+    }
+
+    // 2. Extract sanitized values strictly from the authoritative class dump schema
+    const cleanValues = collectValuesFromDump(dumpRoot.value, dumpRoot.__getters__, dumpRoot.__editor_props__);
+
+    // 3. Preserve non-@property backing fields (e.g. _bundle) ONLY when their setter-backed public property still exists
+    for (const k of Object.keys(currentSaved)) {
+        if (!k.startsWith('_') || k.startsWith('__') || _ignores.includes(k) || k in cleanValues) continue;
+        const publicProp = k.slice(1);
+        const pubDump = dumpRoot.value[publicProp];
+        const pubGetter = dumpRoot.__getters__?.[publicProp];
+        const isActiveSetterBacking = Boolean(
+            pubDump &&
+            !isEditorPropItem(pubDump, publicProp, dumpRoot.__editor_props__) &&
+            ((pubGetter && pubGetter.hasSetter) || pubDump.hasSetter)
+        );
+        if (isActiveSetterBacking && !isEditorPropItem(dumpRoot.value[k], k, dumpRoot.__editor_props__)) {
+            cleanValues[k] = currentSaved[k];
+        }
+    }
+
+    const removedKeys = collectRemovedKeys(currentSaved, cleanValues);
+    const changed = JSON.stringify(currentSaved) !== JSON.stringify(cleanValues);
+
+    return { changed, cleanValues, removedKeys };
 }
 
 export function getProjectPath(): string {
@@ -857,13 +1023,15 @@ export async function fixSinglePtsAsset(ptsFilePath: string): Promise<FixResult>
         return { success: false, changed: false, file: ptsFilePath, type: '' };
     }
 
-    // 1. Fetch fresh class dump from scene script
+    const currentSaved = (ptsData && ptsData.__value__) || {};
+
+    // 1. Fetch fresh class dump from scene script (hydrated with saved values so polymorphic subclasses & onFocusInEditor run cleanly)
     let dumpOut: any = null;
     try {
         dumpOut = await Editor.Message.request('scene', 'execute-scene-script', {
             name: 'pts-core',
             method: 'dump',
-            args: [targetType]
+            args: [targetType, currentSaved]
         });
     } catch (e) {
         console.error(`[pts-fixer] Failed to dump class "${targetType}" for ${ptsFilePath}:`, e);
@@ -885,26 +1053,11 @@ export async function fixSinglePtsAsset(ptsFilePath: string): Promise<FixResult>
     }
     const uuid = meta?.uuid;
 
-    // 3. Merge existing saved data with the fresh dump
-    const currentSaved = (ptsData && ptsData.__value__) || {};
-    for (const key of Object.keys(dumpOut.value)) {
-        if (_ignores.includes(key)) continue;
-        populateDumpWithSaved(dumpOut.value[key], currentSaved[key]);
-    }
-
-    // 4. Resolve asset concrete subtypes (async)
+    // 3. Resolve asset concrete subtypes (async)
     await resolveAllAssetSubtypes(dumpOut.value);
 
-    // 5. Extract sanitized and complete values (stripping readonly getters and @editor_property debug props)
-    const cleanValues = collectValuesFromDump(dumpOut.value, dumpOut.__getters__, dumpOut.__editor_props__);
-    if (cleanValues) {
-        for (const k of Object.keys(cleanValues)) {
-            const item = dumpOut.value?.[k];
-            if (isEditorPropItem(item, k, dumpOut.__editor_props__) || dumpOut.__getters__?.[k] || item?.isGetter || dumpOut.value?.['_' + k] !== undefined) {
-                delete cleanValues[k];
-            }
-        }
-    }
+    // 4. Verify & extract sanitized values (pruning removed properties, stripping all getters/setters and @editor_property debug props)
+    const { cleanValues } = verifyAndCleanDataFromDump(currentSaved, dumpOut);
 
     const newPtsData = {
         __type__: targetType,
