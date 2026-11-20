@@ -27,9 +27,10 @@
     },
     "panels": {
         "default": {
-            "title": "pTS-Asset",
+            "title": "pTS Asset",
             "type": "dockable",
             "main": "dist/panel.js",
+            "icon": "./static/icon.png",
             "flags": {
                 "save": true
             },
