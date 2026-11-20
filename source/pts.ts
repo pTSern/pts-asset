@@ -365,12 +365,12 @@ export const template = `
     <div class="pts-footer">
         <ui-button id="logger-button" title="console.log this runtime instance to the browser console">📋 Logger</ui-button>
         <div class="pts-code-block">
-            <ui-checkbox id="json-toggle" checked>Show Code (File)</ui-checkbox>
-            <ui-code id="json-display" language="json"></ui-code>
+            <ui-checkbox id="json-toggle">Show Code (File)</ui-checkbox>
+            <ui-code id="json-display" language="json" style="display: none;"></ui-code>
         </div>
         <div class="pts-code-block" id="script-code-block">
-            <ui-checkbox id="script-toggle" checked>Show Code (Script)</ui-checkbox>
-            <ui-code id="script-display" language="typescript"></ui-code>
+            <ui-checkbox id="script-toggle">Show Code (Script)</ui-checkbox>
+            <ui-code id="script-display" language="typescript" style="display: none;"></ui-code>
         </div>
     </div>
 </div>
@@ -2425,13 +2425,17 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
     }
 
     if (this.$.jsonDisplay && this.$.jsonToggle) {
-        const show = !!(this.$.jsonToggle.value || this.$.jsonToggle.checked);
-        this.$.jsonDisplay.style.display = show ? 'block' : 'none';
+        this.$.jsonToggle.value = false;
+        this.$.jsonToggle.checked = false;
+        this.$.jsonToggle.removeAttribute?.('checked');
+        this.$.jsonDisplay.style.display = 'none';
     }
 
     if (this.$.scriptDisplay && this.$.scriptToggle) {
-        const show = !!(this.$.scriptToggle.value || this.$.scriptToggle.checked);
-        this.$.scriptDisplay.style.display = show ? 'block' : 'none';
+        this.$.scriptToggle.value = false;
+        this.$.scriptToggle.checked = false;
+        this.$.scriptToggle.removeAttribute?.('checked');
+        this.$.scriptDisplay.style.display = 'none';
     }
 
     if (this.$.ptsa) {
@@ -2444,14 +2448,8 @@ export async function update(this: PanelThis, assetList: AssetInfo[], metaList: 
     // including selections made before playback begins.
     await observePreviewSelection(this, _currentAsset.uuid, _cachedData.__type__ || '');
     if (observer.epoch !== selectionEpoch || observer.uuid !== selectedAsset.uuid || _currentPanel !== this) return;
-    if (!_isInLivePreviewMode && _cachedData?.__type__) {
-        Editor.Message.request('scene', 'execute-scene-script', {
-            name: 'pts-core',
-            method: 'on_pts_focus',
-            args: [_cachedData.__type__, _cachedData.__value__, _currentAsset.uuid]
-        }).catch(() => {});
-    }
 
+    // Authoring dump runs onFocusInEditor() once right before rendering the Inspector UI.
     if (!_isInLivePreviewMode) requestAuthoringDump(this, observer);
 
     const saveAsset = async () => {
@@ -3512,11 +3510,6 @@ export function ready(this: PanelThis) {
             if (!_inspectorTickTimer && !_isInLivePreviewMode) {
                 startInspectorTicking(this);
             }
-            Editor.Message.request('scene', 'execute-scene-script', {
-                name: 'pts-core',
-                method: 'on_pts_focus',
-                args: [_cachedData.__type__, collectValuesForLiveEvaluation(this), _currentAsset.uuid]
-            }).catch(() => {});
         }
     };
     observer.focus = triggerFocusInEditor;
