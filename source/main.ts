@@ -133,6 +133,153 @@ export const methods: { [key: string]: (...any: any) => any } = {
         const _out = await Editor.Message.request('asset-db', 'query-asset-info', url)
         console.log("Output Registered Asset:", _out);
     },
+    async registerPtsAsset(info: { uuid?: string; url?: string; file?: string; type?: string; isLazy?: boolean; isForceLazy?: boolean }) {
+        try {
+            let uuid = info?.uuid || '';
+            let url = info?.url || '';
+            let file = info?.file || '';
+            const projectPath = (typeof Editor !== 'undefined' && Editor.Project && Editor.Project.path) ? Editor.Project.path : process.cwd();
+
+            if (!file && url && url.startsWith('db://assets/')) {
+                file = path.join(projectPath, 'assets', url.slice('db://assets/'.length));
+            }
+            if (!url && file) {
+                const rel = path.relative(projectPath, file).replace(/\\/g, '/');
+                if (rel.startsWith('assets/')) url = `db://${rel}`;
+            }
+
+            if (url) {
+                try {
+                    await Editor.Message.request('asset-db', 'refresh-asset', url);
+                } catch {}
+            }
+
+            let assetInfo: any = null;
+            const queryTarget = uuid || url;
+            if (queryTarget) {
+                try {
+                    assetInfo = await Editor.Message.request('asset-db', 'query-asset-info', queryTarget);
+                } catch {}
+            }
+            if (assetInfo) {
+                uuid = assetInfo.uuid || uuid;
+                url = assetInfo.url || url;
+                file = assetInfo.file || file;
+            }
+
+            if (!uuid && file && fs.existsSync(`${file}.meta`)) {
+                try {
+                    const metaDisk = JSON.parse(fs.readFileSync(`${file}.meta`, 'utf8'));
+                    if (metaDisk?.uuid) uuid = metaDisk.uuid;
+                } catch {}
+            }
+
+            let targetType = info?.type || '';
+            let depends: string[] = [];
+            if (file && fs.existsSync(file)) {
+                try {
+                    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+                    if (!targetType && parsed?.__type__) targetType = parsed.__type__;
+                    depends = extractAssetDependencies(parsed);
+                } catch {}
+            }
+
+            if (uuid) {
+                let meta: any = null;
+                try {
+                    meta = await Editor.Message.request('asset-db', 'query-asset-meta', uuid);
+                } catch {}
+                if (meta) {
+                    meta.userData = meta.userData || {};
+                    if (targetType) meta.userData.__type__ = targetType;
+                    meta.userData.__depends__ = depends;
+                    delete meta.userData.depends;
+                    if (typeof info?.isLazy === 'boolean') {
+                        meta.userData.isLazy = info.isLazy;
+                        if (!info.isLazy) {
+                            meta.userData.isForceLazy = false;
+                            meta.userData.forceLazy = false;
+                        }
+                    }
+                    if (typeof info?.isForceLazy === 'boolean') {
+                        const isForce = info.isForceLazy && (meta.userData.isLazy !== false);
+                        if (isForce) meta.userData.isLazy = true;
+                        meta.userData.isForceLazy = isForce;
+                        meta.userData.forceLazy = isForce;
+                    }
+                    if (Array.isArray(meta.files)) {
+                        if (!meta.files.includes('.json')) meta.files.unshift('.json');
+                        if (!meta.files.includes('.pts')) meta.files.push('.pts');
+                    }
+                    try {
+                        await Editor.Message.request('asset-db', 'save-asset-meta', uuid, JSON.stringify(meta));
+                    } catch {}
+                }
+
+                _ptsTypeCache.delete(uuid);
+                if (file) _ptsTypeCache.delete(file);
+                if (file && fs.existsSync(file)) {
+                    _indexSinglePtsFile(file, uuid);
+                }
+                if (targetType) {
+                    try {
+                        const extChain = getExtendsChain(targetType);
+                        const typeInfo = { type: targetType, extends: extChain, depends };
+                        setCachedPtsType(uuid, typeInfo);
+                        if (file) setCachedPtsType(file, typeInfo);
+                    } catch {}
+                }
+                if (assetInfo && meta) {
+                    await _patchPtsLibrary(uuid, assetInfo, meta);
+                }
+            }
+
+            scheduleLazyAutoSync();
+            Editor.Message.broadcast('pts-asset:refresh-inspector', {
+                uuid,
+                url,
+                file,
+                type: targetType
+            });
+            return { ok: true, uuid, url, file, type: targetType, depends };
+        } catch (err: any) {
+            console.error('[pts-asset] registerPtsAsset error:', err);
+            return { ok: false, error: err?.message || String(err) };
+        }
+    },
+    async refreshPtsInspector(info?: { uuid?: string; url?: string; file?: string; type?: string }) {
+        try {
+            const uuid = info?.uuid || '';
+            const url = info?.url || '';
+            const file = info?.file || '';
+            const type = info?.type || '';
+            if (uuid) _ptsTypeCache.delete(uuid);
+            if (file) _ptsTypeCache.delete(file);
+            if (file && fs.existsSync(file)) {
+                _indexSinglePtsFile(file, uuid || undefined);
+            }
+            if (uuid) {
+                try {
+                    const data = await Editor.Message.request('asset-db', 'query-asset-info', uuid);
+                    const meta = await Editor.Message.request('asset-db', 'query-asset-meta', uuid);
+                    if (data && meta) {
+                        await _patchPtsLibrary(uuid, data, meta);
+                    }
+                } catch {}
+            }
+            scheduleLazyAutoSync();
+            Editor.Message.broadcast('pts-asset:refresh-inspector', {
+                uuid,
+                url,
+                file,
+                type
+            });
+            return { ok: true, uuid, url, file, type };
+        } catch (err: any) {
+            console.error('[pts-asset] refreshPtsInspector error:', err);
+            return { ok: false, error: err?.message || String(err) };
+        }
+    },
     "_cc:log"() {
         Editor.Message.request('scene', 'execute-scene-script', { name: 'pts-core', method: 'log', args: ["a", "b"] });
     },

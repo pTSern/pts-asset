@@ -441,6 +441,7 @@ interface PreviewObserver {
     signature: string;
     listener: (payload: unknown) => void;
     propertyListener: (payload: unknown) => void;
+    refreshListener: (payload: unknown) => void;
     focus?: () => void;
     blur?: () => void;
 }
@@ -705,11 +706,79 @@ function ensurePreviewObserver(panel: PanelThis): PreviewObserver {
             } else if (panel.$.previewSubText && observer.state?.isPreview && observer.state.found) {
                 panel.$.previewSubText.textContent = 'Edits apply directly to game memory in real-time. Disk saving is disabled.';
             }
+        },
+        refreshListener: (payload: unknown) => {
+            if (_currentPanel !== panel || !_currentAsset || _isInLivePreviewMode || _isSaving) return;
+            const info = (payload && typeof payload === 'object') ? (payload as Record<string, unknown>) : {};
+            const targetUuid = typeof info.uuid === 'string' ? info.uuid : '';
+            const targetUrl = typeof info.url === 'string' ? info.url : '';
+            const targetFile = typeof info.file === 'string' ? info.file : '';
+            const hasTargetFilter = Boolean(targetUuid || targetUrl || targetFile);
+
+            const normPath = (p: string) => p.replace(/\\/g, '/').toLowerCase();
+            const isMatch = !hasTargetFilter ||
+                (targetUuid && _currentAsset.uuid === targetUuid) ||
+                (targetUrl && _currentAsset.url === targetUrl) ||
+                (targetFile && _currentAsset.file && normPath(_currentAsset.file) === normPath(targetFile));
+            if (!isMatch) return;
+
+            try {
+                if (!_currentAsset.file || !fs.existsSync(_currentAsset.file)) return;
+                const raw = fs.readFileSync(_currentAsset.file, 'utf8');
+                const parsed = JSON.parse(raw);
+                _cachedData = parsed;
+                if (_cachedData && _cachedData.__value__ && typeof _cachedData.__value__ === 'object') {
+                    for (const k of Object.keys(_cachedData.__value__)) {
+                        if (_ignores.includes(k) || k.startsWith('__')) {
+                            delete _cachedData.__value__[k];
+                        }
+                    }
+                }
+                if (panel.$.ptsa) {
+                    panel.$.ptsa.value = _cachedData?.__type__ || '';
+                }
+                if (panel.$.jsonDisplay) {
+                    panel.$.jsonDisplay.textContent = JSON.stringify(_cachedData, null, 4);
+                }
+                setSaveButtonDirtyState(false, panel);
+                _authoringDump = null;
+                _lastDump = null;
+
+                // Refresh lazy toggles from updated meta asynchronously if available
+                if (_currentAsset.uuid) {
+                    Editor.Message.request('asset-db', 'query-asset-meta', _currentAsset.uuid).then((meta: any) => {
+                        if (_currentPanel !== panel || !_currentAsset || !meta?.userData) return;
+                        _isUpdatingUi = true;
+                        try {
+                            if (panel.$.lazyToggle) {
+                                const isLazy = !!meta.userData.isLazy;
+                                panel.$.lazyToggle.value = isLazy;
+                                panel.$.lazyToggle.checked = isLazy;
+                                _lastLazyState = isLazy;
+                                if (panel.$.forceLazyToggle) {
+                                    const isForceLazy = isLazy && !!(meta.userData.isForceLazy || meta.userData.forceLazy);
+                                    panel.$.forceLazyToggle.value = isForceLazy;
+                                    panel.$.forceLazyToggle.checked = isForceLazy;
+                                    panel.$.forceLazyToggle.style.display = isLazy ? 'inline-flex' : 'none';
+                                    _lastForceLazyState = isForceLazy;
+                                }
+                            }
+                        } finally {
+                            _isUpdatingUi = false;
+                        }
+                    }).catch(() => {});
+                }
+
+                requestAuthoringDump(panel, observer);
+            } catch (err) {
+                console.warn('[pTS Inspector] Failed to refresh inspector from external update:', err);
+            }
         }
     };
     _previewObservers.set(panel, observer);
     Editor.Message.addBroadcastListener('pts-asset:preview-data-changed', observer.listener);
     Editor.Message.addBroadcastListener('pts-asset:runtime-property-result', observer.propertyListener);
+    Editor.Message.addBroadcastListener('pts-asset:refresh-inspector', observer.refreshListener);
     return observer;
 }
 
@@ -3576,6 +3645,7 @@ export function close(this: PanelThis) {
     if (observer) {
         Editor.Message.removeBroadcastListener('pts-asset:preview-data-changed', observer.listener);
         Editor.Message.removeBroadcastListener('pts-asset:runtime-property-result', observer.propertyListener);
+        Editor.Message.removeBroadcastListener('pts-asset:refresh-inspector', observer.refreshListener);
         if (observer.focus) {
             this.$this?.removeEventListener('pointerdown', observer.focus);
             this.$this?.removeEventListener('focusin', observer.focus);

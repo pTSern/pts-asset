@@ -148,6 +148,16 @@
                     "register"
                 ]
             },
+            "register-pts-asset": {
+                "methods": [
+                    "registerPtsAsset"
+                ]
+            },
+            "refresh-pts-inspector": {
+                "methods": [
+                    "refreshPtsInspector"
+                ]
+            },
             "reload": {
                 "description": "Reload the whole extension.",
                 "methods": [
